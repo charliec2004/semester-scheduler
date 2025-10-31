@@ -850,7 +850,7 @@ def main():
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 60  # Increased to 60 seconds for better optimization
     
-    print("🔄 Solving the scheduling problem...")
+    print("Solving the scheduling problem...")
     print(f"   - {len(employees)} employees")
     print(f"   - {len(days)} days")
     print(f"   - {len(T)} time slots per day")
@@ -950,7 +950,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
         return
     
     # Print solver statistics
-    print(f"\n✅ Solution found!")
+    print(f"\nSolution found!")
     print(f"\nSolver Statistics:")
     print(f"  - Total execution time: {total_time:.2f} seconds")
     print(f"  - Solver computation time: {solver.wall_time:.2f} seconds")
@@ -964,7 +964,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     
     for d in days:
         print(f"\n{'─' * 120}")
-        print(f"📅 {d.upper()}")
+        print(f"{d.upper()}")
         print(f"{'─' * 120}")
         
         # Header row
@@ -1001,7 +1001,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     # ========================================================================
     
     print(f"\n{'=' * 120}")
-    print("👥 EMPLOYEE SUMMARY")
+    print("EMPLOYEE SUMMARY")
     print(f"{'=' * 120}\n")
     
     print(f"{'Employee':<12}{'Qualifications':<25}{'Hours (Target/Max)':<25}{'Days Worked'}")
@@ -1043,7 +1043,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     # ========================================================================
     
     print(f"\n{'=' * 120}")
-    print("📊 ROLE DISTRIBUTION")
+    print("ROLE DISTRIBUTION")
     print(f"{'=' * 120}\n")
     
     role_totals = {role: 0 for role in roles}
@@ -1253,7 +1253,7 @@ def export_schedule_to_excel(
             sheets_payload.append(("Department Targets", [dept_summary_headers] + dept_summary_rows))
         _write_minimal_xlsx(output_path, sheets_payload)
     
-    print(f"📁 Schedule exported to {output_path}")
+    print(f"Schedule exported to {output_path}")
 
 
 def _autosize_columns(writer: pd.ExcelWriter, sheet_name: str, dataframe: pd.DataFrame):

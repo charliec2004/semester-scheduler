@@ -10,7 +10,7 @@ This program creates an optimal weekly employee schedule that satisfies:
 
 Key Features:
 - front_desks MUST be present at all times (hard constraint)
-- Restockers can only work when a front_desk is present
+- other_works can only work when a front_desk is present
 - Multiple employees can work the same role simultaneously
 - Each employee works one continuous block per day (3-6 hours)
 """
@@ -44,7 +44,7 @@ def main():
     days = ["Mon", "Tue", "Wed", "Thu", "Fri"]  # Weekdays only - no weekend shifts
     
     # Available job roles
-    roles = ["front_desk", "Restocker"]
+    roles = ["front_desk", "other_work"]
     
     # Time slot configuration - 30 MINUTE INCREMENTS
     # T represents 18 half-hour time slots from 8am to 5pm
@@ -108,7 +108,7 @@ def main():
     # 1 = Freshman (highest priority for front desk)
     # 2 = Sophomore (high priority)
     # 3 = Junior (lower priority)
-    # 4 = Senior (lowest priority - prefer them for restocking)
+    # 4 = Senior (lowest priority - prefer them for other work)
     # This creates a soft preference: underclassmen preferred at front desk
     employee_year = {
         "Alice":   2,  # Sophomore
@@ -155,8 +155,9 @@ def main():
     # Value of 1 means "we need 1 person in this role at this time"
     # Value of 0 means "no requirement for this role at this time"
     demand = {
-        role: {
-            day: [0] * len(T) for day in days
+        role: {                    # Dictionary (outer level)
+            day: [0] * len(T)      # Dictionary (middle level) -> List (inner level)
+            for day in days
         } for role in roles
     }
     
@@ -165,7 +166,7 @@ def main():
         for time_slot in T:
             demand["front_desk"][day][time_slot] = 1
     
-    # Note: Restockers have no fixed demand - they're assigned flexibly
+    # Note: other_works have no fixed demand - they're assigned flexibly
     # based on availability and the objective function
     
     
@@ -177,18 +178,18 @@ def main():
     # Format: {employee_name: {set of roles they can perform}}
     qual = {
         "Alice":   {"front_desk"},                    # front_desk specialist
-        "Bob":     {"front_desk", "Restocker"},       # Cross-trained
-        "Charlie": {"front_desk", "Restocker"},       # Cross-trained
-        "Diana":   {"Restocker"},                  # Restocker specialist
+        "Bob":     {"front_desk", "other_work"},       # Cross-trained
+        "Charlie": {"front_desk", "other_work"},       # Cross-trained
+        "Diana":   {"other_work"},                  # other_work specialist
         "Eve":     {"front_desk"},                    # front_desk specialist
-        "Frank":   {"Restocker"},                  # Restocker specialist
-        "Grace":   {"front_desk", "Restocker"},       # Cross-trained
+        "Frank":   {"front_desk", "other_work"},                  # other_work specialist
+        "Grace":   {"front_desk", "other_work"},       # Cross-trained
         "Henry":   {"front_desk"},                    # front_desk specialist
-        "Iris":    {"Restocker"},                  # Restocker specialist
-        "Jack":    {"front_desk", "Restocker"},       # Cross-trained
+        "Iris":    {"front_desk", "other_work"},                  # other_work specialist
+        "Jack":    {"front_desk", "other_work"},       # Cross-trained
         "Kelly":   {"front_desk"},                    # front_desk specialist
-        "Leo":     {"Restocker"},                  # Restocker specialist
-        "Olivia":  {"Restocker"},                  # Restocker specialist
+        "Leo":     {"front_desk", "other_work"},                  # other_work specialist
+        "Olivia":  {"front_desk", "other_work"},                  # other_work specialist
     }
     
     
@@ -543,13 +544,13 @@ def main():
                     sum(assign.get((e, d, t, r), 0) for r in qual[e]) == work[e, d, t]
                 )
                 
-                # Constraint 9.3: CRITICAL - Restockers need front_desk supervision
-                # A restocker can ONLY work when at least one front_desk is present
-                # This prevents scenarios where only restockers are working
-                if (e, d, t, "Restocker") in assign:
+                # Constraint 9.3: CRITICAL - other_works need front_desk supervision
+                # A other_work can ONLY work when at least one front_desk is present
+                # This prevents scenarios where only other_works are working
+                if (e, d, t, "other_work") in assign:
                     model.add(
                         sum(assign.get((emp, d, t, "front_desk"), 0) for emp in employees) >= 1
-                    ).only_enforce_if(assign[(e, d, t, "Restocker")])
+                    ).only_enforce_if(assign[(e, d, t, "other_work")])
     
     
     # ============================================================================
@@ -579,10 +580,10 @@ def main():
             # HARD CONSTRAINT: At most 1 front desk at a time (no overstaffing)
             model.add(num_front_desk <= 1)
             
-            # RESTOCKER COVERAGE: At most 3 restockers at any time
+            # RESTOCKER COVERAGE: At most 3 other_works at any time
             # This prevents overcrowding while allowing flexibility
             model.add(
-                sum(assign.get((e, d, t, "Restocker"), 0) for e in employees) <= 3
+                sum(assign.get((e, d, t, "other_work"), 0) for e in employees) <= 3
             )
     
     
@@ -591,28 +592,28 @@ def main():
     # ============================================================================
     # What we're trying to optimize (maximize in this case)
     
-    # Count total restocker assignments across all employees, days, and times
-    restocker_assignments = sum(
-        assign.get((e, d, t, "Restocker"), 0) 
+    # Count total other_work assignments across all employees, days, and times
+    other_work_assignments = sum(
+        assign.get((e, d, t, "other_work"), 0) 
         for e in employees 
         for d in days 
         for t in T
     )
     
-    # Calculate "spread" metric: count how many time slots have at least 1 restocker
+    # Calculate "spread" metric: count how many time slots have at least 1 other_work
     # This encourages distribution throughout the day rather than clustering
-    restocker_spread_score = 0
+    other_work_spread_score = 0
     for d in days:
         for t in T:
-            # Create indicator: does this time slot have any restockers?
-            has_restocker = model.new_bool_var(f"has_restocker[{d},{t}]")
-            num_restockers = sum(assign.get((e, d, t, "Restocker"), 0) for e in employees)
+            # Create indicator: does this time slot have any other_works?
+            has_other_work = model.new_bool_var(f"has_other_work[{d},{t}]")
+            num_other_works = sum(assign.get((e, d, t, "other_work"), 0) for e in employees)
             
-            # Link indicator to actual restocker count
-            model.add(num_restockers >= 1).only_enforce_if(has_restocker)
-            model.add(num_restockers == 0).only_enforce_if(has_restocker.Not())
+            # Link indicator to actual other_work count
+            model.add(num_other_works >= 1).only_enforce_if(has_other_work)
+            model.add(num_other_works == 0).only_enforce_if(has_other_work.Not())
             
-            restocker_spread_score += has_restocker
+            other_work_spread_score += has_other_work
     
     # Calculate target hours encouragement (SOFT constraint via objective)
     # We want to encourage employees to work close to their target hours
@@ -717,20 +718,20 @@ def main():
     # 1. Front desk coverage (weight 1000) - CRITICAL but soft, prioritizes early hours
     # 2. Large deviation penalty (weight 1) - MASSIVE penalty for being 2+ hours off target (-5000 per person)
     # 3. Target adherence (weight 100) - STRONGLY encourage hitting target hours (graduated by year)
-    # 4. Restocker spread (weight 50) - Prefer many time slots with restockers
+    # 4. other_work spread (weight 50) - Prefer many time slots with other_works
     # 5. Shift length preference (weight 20) - Gently prefer longer shifts (reduced to allow flexibility)
     # 6. Underclassmen at front desk (weight 0.5) - VERY gentle nudge when all else equal
-    # 7. Total restockers (weight 1) - Fill available capacity
+    # 7. Total other_works (weight 1) - Fill available capacity
     # Note: Front desk coverage is heavily weighted but NOT a hard constraint
     #       If impossible to cover all hours, later hours drop first (due to time_weight)
     model.maximize(
         1000 * front_desk_coverage_score +   # Prioritize front desk coverage with time weighting
         large_deviation_penalty +            # MASSIVE penalty for 2+ hour deviations (-5000 per person)
         100 * target_adherence_score +       # Strongly encourage target hour adherence
-        50 * restocker_spread_score +
+        50 * other_work_spread_score +
         20 * shift_length_bonus +            # Reduced to allow more flexibility for hour distribution
         0.5 * underclassmen_preference_score + # VERY gentle - only matters when everything else equal
-        restocker_assignments
+        other_work_assignments
     )
     
     
@@ -815,7 +816,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
         
         # Header row
         print(f"\n{'Time':<12}", end="")
-        print(f"{'front_desks':<40}{'Restockers':<40}")
+        print(f"{'front_desks':<40}{'other_works':<40}")
         print("─" * 92)
         
         # Data rows - one per time slot
@@ -829,18 +830,18 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
                 and solver.value(assign[(e, d, t, "front_desk")])
             ]
             
-            # Find all restockers working this slot
-            restockers = [
+            # Find all other_works working this slot
+            other_works = [
                 e for e in employees
-                if (e, d, t, "Restocker") in assign 
-                and solver.value(assign[(e, d, t, "Restocker")])
+                if (e, d, t, "other_work") in assign 
+                and solver.value(assign[(e, d, t, "other_work")])
             ]
             
             # Format the output
             front_desk_str = ", ".join(front_desks) if front_desks else "❌ UNCOVERED"
-            restocker_str = ", ".join(restockers) if restockers else "-"
+            other_work_str = ", ".join(other_works) if other_works else "-"
             
-            print(f"{time_slot:<12}{front_desk_str:<40}{restocker_str:<40}")
+            print(f"{time_slot:<12}{front_desk_str:<40}{other_work_str:<40}")
     
     
     # ========================================================================
@@ -894,34 +895,34 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     print(f"{'=' * 120}\n")
     
     total_front_desk_slots = 0
-    total_restocker_slots = 0
+    total_other_work_slots = 0
     
     for d in days:
         front_desk_count = 0
-        restocker_count = 0
+        other_work_count = 0
         
         # Count assignments for this day (in 30-minute slots)
         for t in T:
             for e in employees:
                 if (e, d, t, "front_desk") in assign and solver.value(assign[(e, d, t, "front_desk")]):
                     front_desk_count += 1
-                if (e, d, t, "Restocker") in assign and solver.value(assign[(e, d, t, "Restocker")]):
-                    restocker_count += 1
+                if (e, d, t, "other_work") in assign and solver.value(assign[(e, d, t, "other_work")]):
+                    other_work_count += 1
         
         total_front_desk_slots += front_desk_count
-        total_restocker_slots += restocker_count
+        total_other_work_slots += other_work_count
         
         # Convert to hours for display
         front_desk_hours = front_desk_count * 0.5
-        restocker_hours = restocker_count * 0.5
+        other_work_hours = other_work_count * 0.5
         
-        print(f"{d}: {front_desk_hours:.1f} front_desk-hours, {restocker_hours:.1f} restocker-hours")
+        print(f"{d}: {front_desk_hours:.1f} front_desk-hours, {other_work_hours:.1f} other_work-hours")
     
     # Convert totals to hours
     total_front_desk_hours = total_front_desk_slots * 0.5
-    total_restocker_hours = total_restocker_slots * 0.5
+    total_other_work_hours = total_other_work_slots * 0.5
     
-    print(f"\n{'TOTAL:':<4} {total_front_desk_hours:.1f} front_desk-hours, {total_restocker_hours:.1f} restocker-hours across the week")
+    print(f"\n{'TOTAL:':<4} {total_front_desk_hours:.1f} front_desk-hours, {total_other_work_hours:.1f} other_work-hours across the week")
     print("=" * 120 + "\n")
 
 # ============================================================================

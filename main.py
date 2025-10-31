@@ -15,16 +15,223 @@ Key Features:
 - Each employee works one continuous block per day (3-6 hours)
 """
 
-from ortools.sat.python import cp_model
-from typing import Dict, List, Set, Tuple
-from pathlib import Path
-import pandas as pd
-import importlib.util
+import argparse
+import re
+import sys
 import time
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+import importlib.util
+import pandas as pd
+from ortools.sat.python import cp_model
+
+
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+TIME_SLOT_STARTS = [
+    "08:00", "08:30", "09:00", "09:30",
+    "10:00", "10:30", "11:00", "11:30",
+    "12:00", "12:30", "13:00", "13:30",
+    "14:00", "14:30", "15:00", "15:30",
+    "16:00", "16:30",
+]
+SLOT_NAMES = [
+    "8:00-8:30", "8:30-9:00", "9:00-9:30", "9:30-10:00",
+    "10:00-10:30", "10:30-11:00", "11:00-11:30", "11:30-12:00",
+    "12:00-12:30", "12:30-1:00", "1:00-1:30", "1:30-2:00",
+    "2:00-2:30", "2:30-3:00", "3:00-3:30", "3:30-4:00",
+    "4:00-4:30", "4:30-5:00",
+]
+AVAILABILITY_COLUMNS = [f"{day}_{time}" for day in DAY_NAMES for time in TIME_SLOT_STARTS]
+FRONT_DESK_ROLE = "front_desk"
+DEPARTMENT_HOUR_THRESHOLD = 4  # +/- hours acceptable window
+
+
+def _normalize_columns(df: pd.DataFrame) -> Dict[str, str]:
+    """Create mapping from lowercase column names to original names."""
+    normalized: Dict[str, str] = {}
+    for column in df.columns:
+        key = column.strip().lower()
+        if key in normalized:
+            raise ValueError(f"Duplicate column detected when normalizing headers: '{column}'")
+        normalized[key] = column.strip()
+    return normalized
+
+
+def _parse_roles(raw_roles: Optional[str]) -> List[str]:
+    if pd.isna(raw_roles):
+        return []
+    return [role.strip() for role in re.split(r"[;,]", str(raw_roles)) if role.strip()]
+
+
+def _coerce_numeric(value, column_name: str, record_name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Invalid numeric value '{value}' for column '{column_name}' on record '{record_name}'"
+        ) from None
+
+
+def load_staff_data(path: Path) -> Dict[str, object]:
+    if not path.exists():
+        raise FileNotFoundError(f"Staff CSV not found: {path}")
+
+    df = pd.read_csv(path)
+    df.columns = [col.strip() for col in df.columns]
+    column_map = _normalize_columns(df)
+
+    def require_column(name: str) -> str:
+        if name not in column_map:
+            raise ValueError(f"Required column '{name}' not found in {path}")
+        return column_map[name]
+
+    name_col = require_column("name")
+    roles_col = require_column("roles")
+    target_col = require_column("target_hours")
+    max_col = require_column("max_hours")
+    year_col = require_column("year")
+
+    missing_availability = [col for col in AVAILABILITY_COLUMNS if col not in df.columns]
+    if missing_availability:
+        preview = ", ".join(missing_availability[:5])
+        suffix = "..." if len(missing_availability) > 5 else ""
+        raise ValueError(f"Missing availability columns in {path}: {preview}{suffix}")
+
+    employees: List[str] = []
+    qual: Dict[str, Set[str]] = {}
+    weekly_hour_limits: Dict[str, float] = {}
+    target_weekly_hours: Dict[str, float] = {}
+    employee_year: Dict[str, int] = {}
+    unavailable: Dict[str, Dict[str, List[int]]] = {}
+    all_roles: Set[str] = set()
+
+    for _, row in df.iterrows():
+        name = str(row[name_col]).strip()
+        if not name:
+            raise ValueError("Encountered employee row with empty name.")
+        if name in qual:
+            raise ValueError(f"Duplicate employee name detected: '{name}'")
+
+        roles = _parse_roles(row[roles_col])
+        if not roles:
+            raise ValueError(f"Employee '{name}' must have at least one role defined.")
+        role_set = set(roles)
+        all_roles.update(role_set)
+        qual[name] = role_set
+
+        max_hours = _coerce_numeric(row[max_col], max_col, name)
+        target_hours = min(_coerce_numeric(row[target_col], target_col, name), max_hours)
+        weekly_hour_limits[name] = max_hours
+        target_weekly_hours[name] = target_hours
+
+        year_value = _coerce_numeric(row[year_col], year_col, name)
+        employee_year[name] = int(year_value)
+
+        availability: Dict[str, List[int]] = {}
+        for day in DAY_NAMES:
+            unavailable_slots: List[int] = []
+            for slot_index, start_time in enumerate(TIME_SLOT_STARTS):
+                column = f"{day}_{start_time}"
+                value = row[column]
+                try:
+                    can_work = int(float(value)) == 1
+                except (TypeError, ValueError):
+                    can_work = False
+                if not can_work:
+                    unavailable_slots.append(slot_index)
+            if unavailable_slots:
+                availability[day] = unavailable_slots
+        if availability:
+            unavailable[name] = availability
+
+        employees.append(name)
+
+    if FRONT_DESK_ROLE not in all_roles:
+        raise ValueError(f"No employees qualified for required role '{FRONT_DESK_ROLE}'.")
+
+    return {
+        "employees": employees,
+        "qual": qual,
+        "weekly_hour_limits": weekly_hour_limits,
+        "target_weekly_hours": target_weekly_hours,
+        "employee_year": employee_year,
+        "unavailable": unavailable,
+        "roles": sorted(all_roles),
+    }
+
+
+def load_department_requirements(path: Path) -> Tuple[Dict[str, float], Dict[str, float]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Department requirements CSV not found: {path}")
+
+    df = pd.read_csv(path)
+    df.columns = [col.strip() for col in df.columns]
+    column_map = _normalize_columns(df)
+
+    def require_column(name: str) -> str:
+        if name not in column_map:
+            raise ValueError(f"Required column '{name}' not found in {path}")
+        return column_map[name]
+
+    dept_col = require_column("department")
+    target_col = require_column("target_hours")
+    max_col = require_column("max_hours")
+
+    department_targets: Dict[str, float] = {}
+    department_max_hours: Dict[str, float] = {}
+
+    for _, row in df.iterrows():
+        department = str(row[dept_col]).strip()
+        if not department:
+            raise ValueError("Department requirements CSV contains an empty department name.")
+        if department in department_targets:
+            raise ValueError(f"Duplicate department entry detected: '{department}'")
+
+        target_hours = _coerce_numeric(row[target_col], target_col, department)
+        max_hours = _coerce_numeric(row[max_col], max_col, department)
+        if max_hours < target_hours:
+            raise ValueError(
+                f"Department '{department}' has target hours ({target_hours}) exceeding max hours ({max_hours})."
+            )
+        department_targets[department] = target_hours
+        department_max_hours[department] = max_hours
+
+    return department_targets, department_max_hours
 
 
 def main():
     """Main function to build and solve the scheduling model"""
+    
+    parser = argparse.ArgumentParser(
+        description="Generate an optimized weekly schedule for CPD student employees."
+    )
+    parser.add_argument(
+        "staff_csv",
+        type=Path,
+        help="CSV file containing employee information, roles, hours, and availability.",
+    )
+    parser.add_argument(
+        "requirements_csv",
+        type=Path,
+        help="CSV file specifying department hour targets and maximums.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("schedule.xlsx"),
+        help="Destination path for the exported Excel schedule (default: schedule.xlsx).",
+    )
+    args = parser.parse_args()
+
+    try:
+        staff_data = load_staff_data(args.staff_csv)
+        department_hour_targets_raw, department_max_hours_raw = load_department_requirements(
+            args.requirements_csv
+        )
+    except Exception as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        sys.exit(1)
     
     # ============================================================================
     # STEP 1: INITIALIZE THE CONSTRAINT PROGRAMMING MODEL
@@ -37,147 +244,72 @@ def main():
     # STEP 2: DEFINE THE PROBLEM DOMAIN
     # ============================================================================
     
-    # List of all employees in the system
-    employees = [
-        "Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", 
-        "Grace", "Henry", "Iris", "Jack", "Kelly", "Leo",
-        "Olivia"
-    ]
+    employees: List[str] = staff_data["employees"]
+    qual: Dict[str, Set[str]] = staff_data["qual"]
+    weekly_hour_limits = {emp: float(hours) for emp, hours in staff_data["weekly_hour_limits"].items()}
+    target_weekly_hours = {emp: float(hours) for emp, hours in staff_data["target_weekly_hours"].items()}
+    employee_year = {emp: int(year) for emp, year in staff_data["employee_year"].items()}
+    unavailable: Dict[str, Dict[str, List[int]]] = staff_data["unavailable"]
     
-    # Days of the week we're scheduling for
-    days = ["Mon", "Tue", "Wed", "Thu", "Fri"]  # Weekdays only - no weekend shifts
+    days = DAY_NAMES[:]
+    roles = list(staff_data["roles"])
+    if FRONT_DESK_ROLE not in roles:
+        print(f"❌ Role '{FRONT_DESK_ROLE}' is required but missing from staff data.", file=sys.stderr)
+        sys.exit(1)
+    roles = [FRONT_DESK_ROLE] + [role for role in roles if role != FRONT_DESK_ROLE]
+    department_roles = [role for role in roles if role != FRONT_DESK_ROLE]
     
-    # Available job roles
-    roles = [
-        "front_desk",
-        "career_education",
-        "marketing",
-        "internships",
-        "employer_engagement",
-        "events",
-        "data_systems",
-    ]
-    department_roles = [role for role in roles if role != "front_desk"]
-    department_sizes = {}
-    ROLE_DISPLAY_NAMES = {
-        "front_desk": "Front Desk",
-        "career_education": "Career Education",
-        "marketing": "Marketing",
-        "internships": "Internships",
-        "employer_engagement": "Employer Engagement",
-        "events": "Events",
-        "data_systems": "Data & Systems",
+    missing_targets = [role for role in department_roles if role not in department_hour_targets_raw]
+    missing_max = [role for role in department_roles if role not in department_max_hours_raw]
+    if missing_targets:
+        print(f"❌ Department targets missing for: {', '.join(missing_targets)}", file=sys.stderr)
+        sys.exit(1)
+    if missing_max:
+        print(f"❌ Department max hours missing for: {', '.join(missing_max)}", file=sys.stderr)
+        sys.exit(1)
+    extra_departments = [dept for dept in department_hour_targets_raw if dept not in roles]
+    if extra_departments:
+        print(f"⚠️  Ignoring department requirements with no matching role: {', '.join(extra_departments)}", file=sys.stderr)
+    
+    department_hour_targets = {
+        role: float(department_hour_targets_raw[role])
+        for role in department_roles
     }
+    department_max_hours = {
+        role: float(department_max_hours_raw[role])
+        for role in department_roles
+    }
+    department_hour_threshold = DEPARTMENT_HOUR_THRESHOLD
+    
+    department_sizes = {
+        role: sum(1 for employee in employees if role in qual[employee])
+        for role in department_roles
+    }
+    zero_capacity_departments = [role for role, size in department_sizes.items() if size == 0]
+    if zero_capacity_departments:
+        print(
+            "❌ No qualified employees found for departments: "
+            + ", ".join(zero_capacity_departments),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    
+    ROLE_DISPLAY_NAMES = {
+        role: " ".join(word.capitalize() for word in role.split("_"))
+        for role in roles
+    }
+    ROLE_DISPLAY_NAMES[FRONT_DESK_ROLE] = "Front Desk"
     
     # Time slot configuration - 30 MINUTE INCREMENTS
     # T represents 18 half-hour time slots from 8am to 5pm
     # Index 0 = 8:00-8:30, Index 1 = 8:30-9:00, Index 2 = 9:00-9:30, ..., Index 17 = 4:30-5:00
-    T = list(range(18))  # 0-17 for 18 thirty-minute slots
-    SLOT_NAMES = [
-        "8:00-8:30", "8:30-9:00", "9:00-9:30", "9:30-10:00",
-        "10:00-10:30", "10:30-11:00", "11:00-11:30", "11:30-12:00",
-        "12:00-12:30", "12:30-1:00", "1:00-1:30", "1:30-2:00",
-        "2:00-2:30", "2:30-3:00", "3:00-3:30", "3:30-4:00",
-        "4:00-4:30", "4:30-5:00"
-    ]
+    T = list(range(len(SLOT_NAMES)))  # 0-17 for 18 thirty-minute slots
     
     # Shift length constraints (in 30-minute increments)
     # Each slot = 0.5 hours, so multiply by 2 to get slot counts
     MIN_SLOTS = 4   # Minimum 2 hours = 4 thirty-minute slots
     MAX_SLOTS = 8   # Maximum 4 hours = 8 thirty-minute slots (changed from 12)
     MIN_FRONT_DESK_SLOTS = MIN_SLOTS  # Front desk duty must last at least full shift minimum
-    
-    # Weekly hour limits per employee (customizable)
-    # Individual personal maximum preferences (different from universal 19-hour limit)
-    # These are HARD constraints - employee cannot exceed this limit
-    # Note: These are in HOURS, not slots (will be converted internally)
-    weekly_hour_limits = {
-        "Alice":   12,  # Personal maximum preference
-        "Bob":     11,  # Personal maximum preference
-        "Charlie": 13,  # Can work more
-        "Diana":   12,  # Personal maximum preference
-        "Eve":     11,  # Personal maximum preference
-        "Frank":   12,  # Personal maximum preference
-        "Grace":   12,  # Personal maximum preference
-        "Henry":   11,  # Personal maximum preference
-        "Iris":    12,  # Personal maximum preference
-        "Jack":    11,  # Personal maximum preference
-        "Kelly":   11,  # Personal maximum preference
-        "Leo":     12,  # Personal maximum preference
-        "Olivia":  12,  # Personal maximum preference
-    }
-    
-    # Employee year classification (1=Freshman, 2=Sophomore, 3=Junior, 4=Senior)
-    # Used for graduated preferences (e.g., underclassmen preference for front desk)
-    employee_year = {
-        "Alice":   2,  # Sophomore
-        "Bob":     1,  # Freshman
-        "Charlie": 3,  # Junior
-        "Diana":   2,  # Sophomore
-        "Eve":     3,  # Junior
-        "Frank":   2,  # Sophomore
-        "Grace":   1,  # Freshman
-        "Henry":   4,  # Senior
-        "Iris":    2,  # Sophomore
-        "Jack":    3,  # Junior
-        "Kelly":   1,  # Freshman
-        "Leo":     4,  # Senior
-        "Olivia":  2,  # Sophomore
-    }
-    
-    # Target weekly hours (preferred hours, may differ from max)
-    # Note: 19 hours is the universal maximum for everyone (enforced separately)
-    
-    # Employee year in school (for front desk preference)
-    # 1 = Freshman (highest priority for front desk)
-    # 2 = Sophomore (high priority)
-    # 3 = Junior (lower priority)
-    # 4 = Senior (lowest priority - prefer them for other work)
-    # This creates a soft preference: underclassmen preferred at front desk
-    employee_year = {
-        "Alice":   2,  # Sophomore
-        "Bob":     1,  # Freshman
-        "Charlie": 1,  # Freshman
-        "Diana":   2,  # Sophomore
-        "Eve":     3,  # Junior
-        "Frank":   2,  # Sophomore
-        "Grace":   1,  # Freshman
-        "Henry":   4,  # Senior
-        "Iris":    2,  # Sophomore
-        "Jack":    3,  # Junior
-        "Kelly":   1,  # Freshman
-        "Leo":     2,  # Sophomore
-        "Olivia":  1,  # Freshman
-    }
-    
-    # Target weekly hours per employee (encouraged via objective function)
-    # These are "soft" goals - the solver tries to get close to these values
-    # Customizable per employee based on their preferences
-    # Note: 19 hours is the legal maximum safeguard (enforced separately)
-    target_weekly_hours = {
-        "Alice":   12,  # Target hours
-        "Bob":     11,  # Target hours
-        "Charlie": 13,  # Target hours (higher)
-        "Diana":   11,  # Target hours
-        "Eve":     11,  # Target hours
-        "Frank":   12,  # Target hours
-        "Grace":   11,  # Target hours
-        "Henry":   11,  # Target hours
-        "Iris":    12,  # Target hours
-        "Jack":    11,  # Target hours
-        "Kelly":   11,  # Target hours
-        "Leo":     12,  # Target hours
-        "Olivia":  11,  # Target hours
-    }
-    department_hour_targets = {
-        "career_education": 28,
-        "marketing": 30,
-        "internships": 16,
-        "employer_engagement": 26,
-        "events": 27,
-        "data_systems": target_weekly_hours["Diana"],  # Single-person dept matches Diana
-    }
-    department_hour_threshold = 4  # +/- hours acceptable window
     
     
     # ============================================================================
@@ -204,189 +336,10 @@ def main():
     
     
     # ============================================================================
-    # STEP 4: DEFINE EMPLOYEE QUALIFICATIONS
+    # STEP 4 & STEP 5: QUALIFICATIONS AND AVAILABILITY
     # ============================================================================
-    
-    # Each employee can only work roles they're qualified for
-    # Format: {employee_name: {set of roles they can perform}}
-    qual = {
-        "Alice":   {"front_desk", "events"},
-        "Bob":     {"front_desk", "events"},
-        "Charlie": {"front_desk", "events"},
-        "Diana":   {"data_systems"},
-        "Eve":     {"front_desk", "employer_engagement"},
-        "Frank":   {"front_desk", "employer_engagement"},
-        "Grace":   {"front_desk", "internships"},
-        "Henry":   {"front_desk", "internships"},
-        "Iris":    {"front_desk", "marketing"},
-        "Jack":    {"front_desk", "marketing"},
-        "Kelly":   {"front_desk", "career_education"},
-        "Leo":     {"front_desk", "career_education"},
-        "Olivia":  {"front_desk", "career_education"},
-    }
-    department_sizes = {
-        role: sum(1 for e in employees if role in qual[e])
-        for role in department_roles
-    }
-    
-    
-    # ============================================================================
-    # STEP 5: DEFINE EMPLOYEE AVAILABILITY CONSTRAINTS
-    # ============================================================================
-    
-    # Format: {employee: {day: [list of unavailable time slots]}}
-    # College student schedules with typical patterns:
-    # - MWF classes (Monday/Wednesday/Friday same times)
-    # - TR classes (Tuesday/Thursday same times)
-    # - Lunch breaks (varied times: 10:30-11:00, 11:00-11:30, 12:00-1:00, 1:00-1:30, 1:30-2:00)
-    # - More availability on Fridays
-    # Each slot is 30 minutes: 0=8:00, 2=9:00, 4=10:00, 5=10:30, 6=11:00, 7=11:30, 8=12:00, 9=12:30, 10=1:00, 11=1:30, 12=2:00, 14=3:00, 16=4:00
-    
-    unavailable = {
-        "Alice": {
-            # MWF: Chemistry 9:00-10:30am, English 2:00-3:30pm
-            # TR: Math 10:00-11:30am
-            # Lunch: 10:30-11:00am daily (early lunch)
-            "Mon": [2, 3, 4, 5, 12, 13, 14, 15],  # Chemistry, lunch, English
-            "Tue": [4, 5, 6, 7],                   # Math, lunch
-            "Wed": [2, 3, 4, 5, 12, 13, 14, 15],  # Chemistry, lunch, English
-            "Thu": [4, 5, 6, 7],                   # Math, lunch
-            "Fri": [5],                            # Just lunch - more availability!
-        },
-        
-        "Bob": {
-            # TR: Biology Lab 8:00-11:00am, History 2:00-3:30pm
-            # MWF: Philosophy 11:00-12:00pm
-            # Lunch: 1:00-1:30pm (late lunch)
-            "Mon": [6, 7, 10, 11],                       # Philosophy, lunch
-            "Tue": [0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15],  # Bio lab, lunch, History
-            "Wed": [6, 7, 10, 11],                       # Philosophy, lunch
-            "Thu": [0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15],  # Bio lab, lunch, History
-            "Fri": [10, 11],                             # Lunch
-        },
-        
-        "Charlie": {
-            # MWF: Calculus 10:00-11:00am, CS 1:00-2:30pm
-            # TR: Physics 9:00-11:00am
-            # Lunch: 11:30-12:00pm
-            "Mon": [4, 5, 7, 10, 11, 12, 13],      # Calculus, lunch, CS
-            "Tue": [2, 3, 4, 5, 6, 7],              # Physics, lunch
-            "Wed": [4, 5, 7, 10, 11, 12, 13],      # Calculus, lunch, CS
-            "Thu": [2, 3, 4, 5, 6, 7],              # Physics, lunch
-            "Fri": [7],                             # Just lunch
-        },
-        
-        "Diana": {
-            # TR: Art Studio 8:00-12:00pm, Stats 3:00-4:30pm
-            # MWF: Sociology 9:30-11:00am
-            # Lunch: 12:00-12:30pm
-            "Mon": [3, 4, 5, 6, 7, 8, 9],               # Sociology, lunch
-            "Tue": [0, 1, 2, 3, 4, 5, 6, 7, 14, 15, 16, 17],  # Art, Stats
-            "Wed": [3, 4, 5, 6, 7, 8, 9],               # Sociology, lunch
-            "Thu": [0, 1, 2, 3, 4, 5, 6, 7, 14, 15, 16, 17],  # Art, Stats
-            "Fri": [8, 9],                               # Lunch
-        },
-        
-        "Eve": {
-            # MWF: Business 8:30-10:00am, Marketing 3:00-4:00pm
-            # TR: Accounting 11:00-1:00pm (includes lunch)
-            # Lunch: 1:30-2:00pm MWF
-            "Mon": [1, 2, 3, 4, 11, 12, 14, 15],    # Business, lunch, Marketing
-            "Tue": [6, 7, 8, 9, 10, 11],            # Accounting (no separate lunch)
-            "Wed": [1, 2, 3, 4, 11, 12, 14, 15],    # Business, lunch, Marketing
-            "Thu": [6, 7, 8, 9, 10, 11],            # Accounting
-            "Fri": [11, 12],                        # Lunch
-        },
-        
-        "Frank": {
-            # TR: Engineering 8:00-10:30am, Lab 2:00-4:30pm
-            # MWF: Economics 10:00-11:30am
-            # Lunch: 11:00-11:30am
-            "Mon": [4, 5, 6, 7],                    # Economics, lunch
-            "Tue": [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17],  # Engineering, lunch, Lab
-            "Wed": [4, 5, 6, 7],                    # Economics, lunch
-            "Thu": [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17],  # Engineering, lunch, Lab
-            "Fri": [6, 7],                          # Lunch
-        },
-        
-        "Grace": {
-            # MWF: Psychology 9:00-10:30am
-            # TR: Spanish 10:30-12:00pm
-            # Lunch: 12:30-1:00pm
-            "Mon": [2, 3, 4, 5, 9, 10],             # Psychology, lunch
-            "Tue": [5, 6, 7, 9, 10],                # Spanish, lunch
-            "Wed": [2, 3, 4, 5, 9, 10],             # Psychology, lunch
-            "Thu": [5, 6, 7, 9, 10],                # Spanish, lunch
-            "Fri": [9, 10],                         # Lunch
-        },
-        
-        "Henry": {
-            # TR: Computer Science 9:30-11:30am, Seminar 1:00-2:00pm
-            # MWF: Writing 11:00-12:30pm
-            # Lunch: 12:00-12:30pm MWF, 12:30-1:00pm TR
-            "Mon": [6, 7, 8, 9],                    # Writing, lunch
-            "Tue": [3, 4, 5, 6, 7, 9, 10, 11],      # CS, lunch, Seminar
-            "Wed": [6, 7, 8, 9],                    # Writing, lunch
-            "Thu": [3, 4, 5, 6, 7, 9, 10, 11],      # CS, lunch, Seminar
-            "Fri": [8, 9],                          # Lunch
-        },
-        
-        "Iris": {
-            # MWF: Dance 8:00-9:30am, Music 3:30-5:00pm
-            # TR: Theater 10:00-12:00pm
-            # Lunch: 1:00-1:30pm
-            "Mon": [0, 1, 2, 3, 10, 11, 15, 16, 17],  # Dance, lunch, Music
-            "Tue": [4, 5, 6, 7, 10, 11],              # Theater, lunch
-            "Wed": [0, 1, 2, 3, 10, 11, 15, 16, 17],  # Dance, lunch, Music
-            "Thu": [4, 5, 6, 7, 10, 11],              # Theater, lunch
-            "Fri": [10, 11],                          # Lunch
-        },
-        
-        "Jack": {
-            # TR: Biology 8:30-10:30am, Chemistry 2:30-4:30pm
-            # MWF: Geology 1:00-2:30pm
-            # Lunch: 11:00-11:30am
-            "Mon": [6, 7, 10, 11, 12, 13],          # Lunch, Geology
-            "Tue": [1, 2, 3, 4, 5, 6, 7, 13, 14, 15, 16, 17],  # Biology, lunch, Chemistry
-            "Wed": [6, 7, 10, 11, 12, 13],          # Lunch, Geology
-            "Thu": [1, 2, 3, 4, 5, 6, 7, 13, 14, 15, 16, 17],  # Biology, lunch, Chemistry
-            "Fri": [6, 7],                          # Lunch
-        },
-        
-        "Kelly": {
-            # MWF: Literature 10:30-12:00pm
-            # TR: Anthropology 9:00-10:30am, Political Science 2:00-3:30pm
-            # Lunch: 1:30-2:00pm
-            "Mon": [5, 6, 7, 11, 12],               # Literature, lunch
-            "Tue": [2, 3, 4, 5, 11, 12, 12, 13, 14, 15],  # Anthro, lunch, PoliSci
-            "Wed": [5, 6, 7, 11, 12],               # Literature, lunch
-            "Thu": [2, 3, 4, 5, 11, 12, 12, 13, 14, 15],  # Anthro, lunch, PoliSci
-            "Fri": [11, 12],                        # Lunch
-        },
-        
-        "Leo": {
-            # TR: Statistics 8:00-9:30am, Data Science 3:00-5:00pm
-            # MWF: Programming 11:30-1:00pm (includes lunch)
-            # Lunch: 12:00-12:30pm (within class time MWF)
-            "Mon": [7, 8, 9, 10, 11],               # Programming (includes lunch)
-            "Tue": [0, 1, 2, 3, 8, 9, 14, 15, 16, 17],  # Stats, lunch, Data Science
-            "Wed": [7, 8, 9, 10, 11],               # Programming (includes lunch)
-            "Thu": [0, 1, 2, 3, 8, 9, 14, 15, 16, 17],  # Stats, lunch, Data Science
-            "Fri": [8, 9],                          # Lunch
-        },
-        
-        "Olivia": {
-            # MWF: Environmental Science 9:00-10:00am, Lab 3:00-4:30pm
-            # TR: Ecology 11:00-12:30pm
-            # Lunch: 1:00-1:30pm
-            "Mon": [2, 3, 10, 11, 14, 15, 16, 17],  # Env Sci, lunch, Lab
-            "Tue": [6, 7, 8, 9, 10, 11],            # Ecology, lunch
-            "Wed": [2, 3, 10, 11, 14, 15, 16, 17],  # Env Sci, lunch, Lab
-            "Thu": [6, 7, 8, 9, 10, 11],            # Ecology, lunch
-            "Fri": [10, 11],                        # Lunch
-        },
-    }
-    
+    # Qualifications and availability are loaded from the staff CSV input.
+
     # ============================================================================
     # STEP 6: CREATE DECISION VARIABLES
     # ============================================================================
@@ -545,7 +498,7 @@ def main():
         
         # Individual personal preference limit (customized per employee)
         max_weekly_hours = weekly_hour_limits.get(e, 40)  # Default to 40 if not specified
-        max_weekly_slots = max_weekly_hours * 2  # Convert hours to 30-minute slots
+        max_weekly_slots = int(round(max_weekly_hours * 2))  # Convert hours to 30-minute slots
         model.add(total_weekly_slots <= max_weekly_slots)
         
         # Universal maximum (applies to everyone)
@@ -690,6 +643,12 @@ def main():
         for role in department_roles
     }
     total_department_assignments = sum(department_assignments.values())
+    department_max_slots = {
+        role: int(round(department_max_hours[role] * 2))
+        for role in department_roles
+    }
+    for role in department_roles:
+        model.add(department_assignments[role] <= department_max_slots[role])
     
     # Calculate "spread" metric for each department: count how many time slots have at least 1 worker
     # This encourages distribution throughout the day rather than clustering
@@ -725,7 +684,8 @@ def main():
         if target_hours is None:
             continue
         max_capacity_hours = sum(weekly_hour_limits.get(e, 0) for e in employees if role in qual[e])
-        adjusted_target_hours = min(target_hours, max_capacity_hours)
+        max_requirement_hours = department_max_hours.get(role, max_capacity_hours)
+        adjusted_target_hours = min(target_hours, max_capacity_hours, max_requirement_hours)
         target_slots = int(adjusted_target_hours * 2)
         total_role_slots = department_assignments[role]
 
@@ -913,6 +873,8 @@ def main():
         roles,
         department_roles,
         ROLE_DISPLAY_NAMES,
+        department_hour_targets,
+        department_max_hours,
     )
     export_schedule_to_excel(
         status,
@@ -929,6 +891,9 @@ def main():
         roles,
         department_roles,
         ROLE_DISPLAY_NAMES,
+        department_hour_targets,
+        department_max_hours,
+        args.output,
     )
 
 
@@ -936,7 +901,7 @@ def main():
 # PRETTY PRINTING FUNCTIONS
 # ============================================================================
 
-def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, assign, weekly_hour_limits, target_weekly_hours, total_time, roles, department_roles, role_display_names):
+def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, assign, weekly_hour_limits, target_weekly_hours, total_time, roles, department_roles, role_display_names, department_hour_targets, department_max_hours):
     """
     Display the schedule in a readable format with statistics
     
@@ -956,6 +921,8 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
         roles: List of all roles including front desk
         department_roles: List of non-front desk roles
         role_display_names: Friendly names for printing per role
+        department_hour_targets: Target hours per department role
+        department_max_hours: Maximum hours per department role
     """
     
     print("\n" + "=" * 120)
@@ -964,7 +931,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     
     # Check if we found a valid solution
     if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        print("❌ No solution found!")
+        print("No solution found!")
         print("\nPossible reasons:")
         print("  - Constraints are too restrictive")
         print("  - Not enough qualified employees")
@@ -1092,7 +1059,17 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     
     print("\nTOTAL HOURS BY ROLE")
     for role in roles:
-        print(f" - {role_display_names[role]}: {role_totals[role] * 0.5:.1f} hours")
+        actual_hours = role_totals[role] * 0.5
+        target = department_hour_targets.get(role)
+        max_hours = department_max_hours.get(role)
+        extras = []
+        if target is not None:
+            extras.append(f"target {target:.1f}")
+            extras.append(f"Δ {actual_hours - target:+.1f}")
+        if max_hours is not None:
+            extras.append(f"max {max_hours:.1f}")
+        details = f" ({', '.join(extras)})" if extras else ""
+        print(f" - {role_display_names[role]}: {actual_hours:.1f} hours{details}")
     
     print("=" * 120 + "\n")
 
@@ -1112,7 +1089,9 @@ def export_schedule_to_excel(
     roles,
     department_roles,
     role_display_names,
-    output_path: Path = Path("schedule.xlsx"),
+    department_hour_targets,
+    department_max_hours,
+    output_path: Path,
 ):
     """
     Export the generated schedule to an Excel workbook with formatted sheets.
@@ -1123,25 +1102,28 @@ def export_schedule_to_excel(
         return
     
     # Resolve writer engine dynamically
-    role_columns = ["front_desk"] + department_roles
-    
-    # Daily tables
+    role_columns = [FRONT_DESK_ROLE] + department_roles
+
+    # Daily tables and weekly rollup
     daily_tables = []
+    weekly_rows = []
+    role_headers = [role_display_names[role] for role in role_columns]
+    weekly_columns = ["Day", "Time"] + role_headers
+
     for day in days:
-        columns = ["Time"] + [role_display_names[role] for role in role_columns]
-        rows = []
+        day_rows = []
         for t in T:
-            row = [SLOT_NAMES[t]]
+            cell_values = []
             for role in role_columns:
                 workers = [
                     e
                     for e in employees
                     if (e, day, t, role) in assign and solver.value(assign[(e, day, t, role)])
                 ]
-                cell_value = ", ".join(workers) if workers else ("UNCOVERED" if role == "front_desk" else "")
-                row.append(cell_value)
-            rows.append(row)
-        daily_tables.append((f"{day} Schedule", columns, rows))
+                cell_values.append(", ".join(workers) if workers else ("UNCOVERED" if role == FRONT_DESK_ROLE else ""))
+            day_rows.append([SLOT_NAMES[t], *cell_values])
+            weekly_rows.append([day, SLOT_NAMES[t], *cell_values])
+        daily_tables.append((f"{day} Schedule", ["Time"] + role_headers, day_rows))
     
     # Employee summary data
     summary_rows = []
@@ -1196,6 +1178,27 @@ def export_schedule_to_excel(
     distribution_rows.append(total_row)
     distribution_columns = ["Day"] + [role_display_names[role] for role in roles]
     
+    dept_summary_headers = [
+        "Department",
+        "Actual Hours",
+        "Target Hours",
+        "Max Hours",
+        "Delta (Actual-Target)",
+    ]
+    dept_summary_rows = []
+    for role in department_roles:
+        actual_hours = role_totals[role] * 0.5
+        target = department_hour_targets.get(role)
+        max_hours = department_max_hours.get(role)
+        delta = actual_hours - target if target is not None else ""
+        dept_summary_rows.append([
+            role_display_names[role],
+            actual_hours,
+            target if target is not None else "",
+            max_hours if max_hours is not None else "",
+            delta,
+        ])
+    
     engine = None
     for candidate in ("xlsxwriter", "openpyxl"):
         if importlib.util.find_spec(candidate):
@@ -1207,6 +1210,10 @@ def export_schedule_to_excel(
     
     if engine:
         with pd.ExcelWriter(output_path, engine=engine) as writer:
+            if weekly_rows:
+                df_weekly = pd.DataFrame(weekly_rows, columns=weekly_columns)
+                df_weekly.to_excel(writer, sheet_name="Weekly Schedule", index=False)
+                _autosize_columns(writer, "Weekly Schedule", df_weekly)
             for sheet_name, columns, rows in daily_tables:
                 df_day = pd.DataFrame(rows, columns=columns)
                 df_day.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -1219,12 +1226,20 @@ def export_schedule_to_excel(
             df_distribution = pd.DataFrame(distribution_rows, columns=distribution_columns)
             df_distribution.to_excel(writer, sheet_name="Role Distribution", index=False)
             _autosize_columns(writer, "Role Distribution", df_distribution)
+            if dept_summary_rows:
+                df_dept = pd.DataFrame(dept_summary_rows, columns=dept_summary_headers)
+                df_dept.to_excel(writer, sheet_name="Department Targets", index=False)
+                _autosize_columns(writer, "Department Targets", df_dept)
     else:
         sheets_payload = []
+        if weekly_rows:
+            sheets_payload.append(("Weekly Schedule", [weekly_columns] + weekly_rows))
         for sheet_name, columns, rows in daily_tables:
             sheets_payload.append((sheet_name, [columns] + rows))
         sheets_payload.append(("Employee Summary", [summary_columns] + summary_rows))
         sheets_payload.append(("Role Distribution", [distribution_columns] + distribution_rows))
+        if dept_summary_rows:
+            sheets_payload.append(("Department Targets", [dept_summary_headers] + dept_summary_rows))
         _write_minimal_xlsx(output_path, sheets_payload)
     
     print(f"📁 Schedule exported to {output_path}")

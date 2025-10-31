@@ -1,7 +1,10 @@
 absl-py==2.3.1
 immutabledict==4.2.2
 numpy==2.3.4
-ortools==9.14.6206
+ortools>=9.0.0
+pandas>=1.0.0
+openpyxl>=3.0.0
+xlsxwriter>=1.0.0
 pandas==2.3.3
 protobuf==6.31.1
 python-dateutil==2.9.0.post0

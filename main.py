@@ -10,13 +10,17 @@ This program creates an optimal weekly employee schedule that satisfies:
 
 Key Features:
 - front_desks MUST be present at all times (hard constraint)
-- other_works can only work when a front_desk is present
+- Department work (career education, marketing, internships, employer engagement, events, data & systems) can only occur when a front_desk is staffed
 - Multiple employees can work the same role simultaneously
 - Each employee works one continuous block per day (3-6 hours)
 """
 
 from ortools.sat.python import cp_model
 from typing import Dict, List, Set, Tuple
+from pathlib import Path
+import pandas as pd
+import importlib.util
+import time
 
 
 def main():
@@ -44,7 +48,26 @@ def main():
     days = ["Mon", "Tue", "Wed", "Thu", "Fri"]  # Weekdays only - no weekend shifts
     
     # Available job roles
-    roles = ["front_desk", "other_work"]
+    roles = [
+        "front_desk",
+        "career_education",
+        "marketing",
+        "internships",
+        "employer_engagement",
+        "events",
+        "data_systems",
+    ]
+    department_roles = [role for role in roles if role != "front_desk"]
+    department_sizes = {}
+    ROLE_DISPLAY_NAMES = {
+        "front_desk": "Front Desk",
+        "career_education": "Career Education",
+        "marketing": "Marketing",
+        "internships": "Internships",
+        "employer_engagement": "Employer Engagement",
+        "events": "Events",
+        "data_systems": "Data & Systems",
+    }
     
     # Time slot configuration - 30 MINUTE INCREMENTS
     # T represents 18 half-hour time slots from 8am to 5pm
@@ -62,6 +85,7 @@ def main():
     # Each slot = 0.5 hours, so multiply by 2 to get slot counts
     MIN_SLOTS = 4   # Minimum 2 hours = 4 thirty-minute slots
     MAX_SLOTS = 8   # Maximum 4 hours = 8 thirty-minute slots (changed from 12)
+    MIN_FRONT_DESK_SLOTS = MIN_SLOTS  # Front desk duty must last at least full shift minimum
     
     # Weekly hour limits per employee (customizable)
     # Individual personal maximum preferences (different from universal 19-hour limit)
@@ -145,6 +169,15 @@ def main():
         "Leo":     12,  # Target hours
         "Olivia":  11,  # Target hours
     }
+    department_hour_targets = {
+        "career_education": 28,
+        "marketing": 30,
+        "internships": 16,
+        "employer_engagement": 26,
+        "events": 27,
+        "data_systems": target_weekly_hours["Diana"],  # Single-person dept matches Diana
+    }
+    department_hour_threshold = 4  # +/- hours acceptable window
     
     
     # ============================================================================
@@ -166,7 +199,7 @@ def main():
         for time_slot in T:
             demand["front_desk"][day][time_slot] = 1
     
-    # Note: other_works have no fixed demand - they're assigned flexibly
+    # Note: Department roles have no fixed demand - they're assigned flexibly
     # based on availability and the objective function
     
     
@@ -177,19 +210,23 @@ def main():
     # Each employee can only work roles they're qualified for
     # Format: {employee_name: {set of roles they can perform}}
     qual = {
-        "Alice":   {"front_desk"},                    # front_desk specialist
-        "Bob":     {"front_desk", "other_work"},       # Cross-trained
-        "Charlie": {"front_desk", "other_work"},       # Cross-trained
-        "Diana":   {"other_work"},                  # other_work specialist
-        "Eve":     {"front_desk"},                    # front_desk specialist
-        "Frank":   {"front_desk", "other_work"},                  # other_work specialist
-        "Grace":   {"front_desk", "other_work"},       # Cross-trained
-        "Henry":   {"front_desk"},                    # front_desk specialist
-        "Iris":    {"front_desk", "other_work"},                  # other_work specialist
-        "Jack":    {"front_desk", "other_work"},       # Cross-trained
-        "Kelly":   {"front_desk"},                    # front_desk specialist
-        "Leo":     {"front_desk", "other_work"},                  # other_work specialist
-        "Olivia":  {"front_desk", "other_work"},                  # other_work specialist
+        "Alice":   {"front_desk", "events"},
+        "Bob":     {"front_desk", "events"},
+        "Charlie": {"front_desk", "events"},
+        "Diana":   {"data_systems"},
+        "Eve":     {"front_desk", "employer_engagement"},
+        "Frank":   {"front_desk", "employer_engagement"},
+        "Grace":   {"front_desk", "internships"},
+        "Henry":   {"front_desk", "internships"},
+        "Iris":    {"front_desk", "marketing"},
+        "Jack":    {"front_desk", "marketing"},
+        "Kelly":   {"front_desk", "career_education"},
+        "Leo":     {"front_desk", "career_education"},
+        "Olivia":  {"front_desk", "career_education"},
+    }
+    department_sizes = {
+        role: sum(1 for e in employees if role in qual[e])
+        for role in department_roles
     }
     
     
@@ -381,6 +418,22 @@ def main():
         for t in T
     }
     
+    # Boolean variables to track front desk assignment transitions (ensures contiguous front desk duty)
+    frontdesk_start = {
+        (e, d, t): model.new_bool_var(f"frontdesk_start[{e},{d},{t}]")
+        for e in employees
+        if "front_desk" in qual[e]
+        for d in days
+        for t in T
+    }
+    frontdesk_end = {
+        (e, d, t): model.new_bool_var(f"frontdesk_end[{e},{d},{t}]")
+        for e in employees
+        if "front_desk" in qual[e]
+        for d in days
+        for t in T
+    }
+    
     # Boolean variable: Is employee 'e' assigned to role 'r' on day 'd' at time 't'?
     # Only create this variable if the employee is qualified for the role
     assign = {
@@ -544,13 +597,47 @@ def main():
                     sum(assign.get((e, d, t, r), 0) for r in qual[e]) == work[e, d, t]
                 )
                 
-                # Constraint 9.3: CRITICAL - other_works need front_desk supervision
-                # A other_work can ONLY work when at least one front_desk is present
-                # This prevents scenarios where only other_works are working
-                if (e, d, t, "other_work") in assign:
-                    model.add(
-                        sum(assign.get((emp, d, t, "front_desk"), 0) for emp in employees) >= 1
-                    ).only_enforce_if(assign[(e, d, t, "other_work")])
+                # Constraint 9.3: CRITICAL - Non-front desk roles need front desk supervision
+                # Any departmental assignment can ONLY happen when at least one front_desk is present
+                # This prevents scenarios where only departmental work is happening unsupervised
+                for r in department_roles:
+                    if (e, d, t, r) in assign:
+                        model.add(
+                            sum(assign.get((emp, d, t, "front_desk"), 0) for emp in employees) >= 1
+                        ).only_enforce_if(assign[(e, d, t, r)])
+
+    # ============================================================================
+    # STEP 9B: FRONT DESK ASSIGNMENT CONTIGUITY
+    # ============================================================================
+    # Prevent employees from toggling in and out of front desk duty within the same shift
+    
+    for e in employees:
+        if "front_desk" not in qual[e]:
+            continue
+        for d in days:
+            fd_starts = [frontdesk_start[e, d, t] for t in T]
+            fd_ends = [frontdesk_end[e, d, t] for t in T]
+            model.add(sum(fd_starts) <= 1)
+            model.add(sum(fd_ends) <= 1)
+            model.add(sum(fd_starts) == sum(fd_ends))
+            
+            assign_fd_0 = assign[(e, d, 0, "front_desk")]
+            model.add(assign_fd_0 == frontdesk_start[e, d, 0])
+            
+            for t in T[1:]:
+                assign_curr = assign[(e, d, t, "front_desk")]
+                assign_prev = assign[(e, d, t-1, "front_desk")]
+                model.add(
+                    assign_curr - assign_prev == frontdesk_start[e, d, t] - frontdesk_end[e, d, t-1]
+                )
+            
+            model.add(frontdesk_end[e, d, T[-1]] == assign[(e, d, T[-1], "front_desk")])
+            
+            total_front_desk_slots = sum(assign[(e, d, t, "front_desk")] for t in T)
+            works_front_desk_today = model.new_bool_var(f"works_front_desk_today[{e},{d}]")
+            model.add(total_front_desk_slots >= 1).only_enforce_if(works_front_desk_today)
+            model.add(total_front_desk_slots == 0).only_enforce_if(works_front_desk_today.Not())
+            model.add(total_front_desk_slots >= MIN_FRONT_DESK_SLOTS).only_enforce_if(works_front_desk_today)
     
     
     # ============================================================================
@@ -580,11 +667,11 @@ def main():
             # HARD CONSTRAINT: At most 1 front desk at a time (no overstaffing)
             model.add(num_front_desk <= 1)
             
-            # RESTOCKER COVERAGE: At most 3 other_works at any time
-            # This prevents overcrowding while allowing flexibility
-            model.add(
-                sum(assign.get((e, d, t, "other_work"), 0) for e in employees) <= 3
-            )
+            # OPTIONAL CAP: keep departmental staffing reasonable relative to membership size
+            for role in department_roles:
+                model.add(
+                    sum(assign.get((e, d, t, role), 0) for e in employees) <= department_sizes[role]
+                )
     
     
     # ============================================================================
@@ -592,28 +679,73 @@ def main():
     # ============================================================================
     # What we're trying to optimize (maximize in this case)
     
-    # Count total other_work assignments across all employees, days, and times
-    other_work_assignments = sum(
-        assign.get((e, d, t, "other_work"), 0) 
-        for e in employees 
-        for d in days 
-        for t in T
-    )
+    # Count total departmental assignments across all employees, days, and times
+    department_assignments = {
+        role: sum(
+            assign.get((e, d, t, role), 0)
+            for e in employees
+            for d in days
+            for t in T
+        )
+        for role in department_roles
+    }
+    total_department_assignments = sum(department_assignments.values())
     
-    # Calculate "spread" metric: count how many time slots have at least 1 other_work
+    # Calculate "spread" metric for each department: count how many time slots have at least 1 worker
     # This encourages distribution throughout the day rather than clustering
-    other_work_spread_score = 0
-    for d in days:
-        for t in T:
-            # Create indicator: does this time slot have any other_works?
-            has_other_work = model.new_bool_var(f"has_other_work[{d},{t}]")
-            num_other_works = sum(assign.get((e, d, t, "other_work"), 0) for e in employees)
-            
-            # Link indicator to actual other_work count
-            model.add(num_other_works >= 1).only_enforce_if(has_other_work)
-            model.add(num_other_works == 0).only_enforce_if(has_other_work.Not())
-            
-            other_work_spread_score += has_other_work
+    department_spread_score = 0
+    for role in department_roles:
+        for d in days:
+            for t in T:
+                has_role = model.new_bool_var(f"has_{role}[{d},{t}]")
+                num_role = sum(assign.get((e, d, t, role), 0) for e in employees)
+                
+                model.add(num_role >= 1).only_enforce_if(has_role)
+                model.add(num_role == 0).only_enforce_if(has_role.Not())
+                
+                department_spread_score += has_role
+    
+    # Encourage each department to appear across multiple days
+    department_day_coverage_score = 0
+    for role in department_roles:
+        for d in days:
+            has_role_day = model.new_bool_var(f"has_{role}[{d}]")
+            total_role_day = sum(assign.get((e, d, t, role), 0) for e in employees for t in T)
+            model.add(total_role_day >= 1).only_enforce_if(has_role_day)
+            model.add(total_role_day == 0).only_enforce_if(has_role_day.Not())
+            department_day_coverage_score += has_role_day
+
+    # Encourage departments to hit target weekly hours (soft constraint)
+    department_target_score = 0
+    department_large_deviation_penalty = 0
+    threshold_slots = department_hour_threshold * 2
+
+    for role in department_roles:
+        target_hours = department_hour_targets.get(role)
+        if target_hours is None:
+            continue
+        max_capacity_hours = sum(weekly_hour_limits.get(e, 0) for e in employees if role in qual[e])
+        adjusted_target_hours = min(target_hours, max_capacity_hours)
+        target_slots = int(adjusted_target_hours * 2)
+        total_role_slots = department_assignments[role]
+
+        over = model.new_int_var(0, 200, f"department_over[{role}]")
+        under = model.new_int_var(0, 200, f"department_under[{role}]")
+        model.add(total_role_slots == target_slots + over - under)
+
+        department_target_score -= over + under
+
+        if threshold_slots > 0:
+            large_over = model.new_bool_var(f"department_large_over[{role}]")
+            large_under = model.new_bool_var(f"department_large_under[{role}]")
+
+            model.add(over >= threshold_slots).only_enforce_if(large_over)
+            model.add(over < threshold_slots).only_enforce_if(large_over.Not())
+
+            model.add(under >= threshold_slots).only_enforce_if(large_under)
+            model.add(under < threshold_slots).only_enforce_if(large_under.Not())
+
+            department_large_deviation_penalty -= 4000 * (large_over + large_under)
     
     # Calculate target hours encouragement (SOFT constraint via objective)
     # We want to encourage employees to work close to their target hours
@@ -718,20 +850,25 @@ def main():
     # 1. Front desk coverage (weight 1000) - CRITICAL but soft, prioritizes early hours
     # 2. Large deviation penalty (weight 1) - MASSIVE penalty for being 2+ hours off target (-5000 per person)
     # 3. Target adherence (weight 100) - STRONGLY encourage hitting target hours (graduated by year)
-    # 4. other_work spread (weight 50) - Prefer many time slots with other_works
-    # 5. Shift length preference (weight 20) - Gently prefer longer shifts (reduced to allow flexibility)
-    # 6. Underclassmen at front desk (weight 0.5) - VERY gentle nudge when all else equal
-    # 7. Total other_works (weight 1) - Fill available capacity
+    # 4. Department spread (weight 60) - Prefer departmental presence across many time slots
+    # 5. Department day coverage (weight 30) - Encourage each department to appear throughout the week
+    # 6. Department hour targets (weight 100) - Encourage departments to hit target hours
+    # 7. Shift length preference (weight 20) - Gently prefer longer shifts (reduced to allow flexibility)
+    # 8. Underclassmen at front desk (weight 0.5) - VERY gentle nudge when all else equal
+    # 9. Total department hours (weight 1) - Fill available departmental capacity
     # Note: Front desk coverage is heavily weighted but NOT a hard constraint
     #       If impossible to cover all hours, later hours drop first (due to time_weight)
     model.maximize(
         1000 * front_desk_coverage_score +   # Prioritize front desk coverage with time weighting
         large_deviation_penalty +            # MASSIVE penalty for 2+ hour deviations (-5000 per person)
         100 * target_adherence_score +       # Strongly encourage target hour adherence
-        50 * other_work_spread_score +
+        60 * department_spread_score +
+        30 * department_day_coverage_score +
+        100 * department_target_score +
         20 * shift_length_bonus +            # Reduced to allow more flexibility for hour distribution
         0.5 * underclassmen_preference_score + # VERY gentle - only matters when everything else equal
-        other_work_assignments
+        total_department_assignments +
+        department_large_deviation_penalty
     )
     
     
@@ -749,7 +886,11 @@ def main():
     print(f"   - {len(assign)} assignment variables")
     print()
     
+    # Track total execution time
+    start_time = time.time()
     status = solver.solve(model)
+    end_time = time.time()
+    total_time = end_time - start_time
     
     
     # ============================================================================
@@ -757,8 +898,37 @@ def main():
     # ============================================================================
     
     print_schedule(
-        status, solver, employees, days, T, SLOT_NAMES, 
-        qual, work, assign, weekly_hour_limits, target_weekly_hours
+        status,
+        solver,
+        employees,
+        days,
+        T,
+        SLOT_NAMES,
+        qual,
+        work,
+        assign,
+        weekly_hour_limits,
+        target_weekly_hours,
+        total_time,
+        roles,
+        department_roles,
+        ROLE_DISPLAY_NAMES,
+    )
+    export_schedule_to_excel(
+        status,
+        solver,
+        employees,
+        days,
+        T,
+        SLOT_NAMES,
+        qual,
+        work,
+        assign,
+        weekly_hour_limits,
+        target_weekly_hours,
+        roles,
+        department_roles,
+        ROLE_DISPLAY_NAMES,
     )
 
 
@@ -766,7 +936,7 @@ def main():
 # PRETTY PRINTING FUNCTIONS
 # ============================================================================
 
-def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, assign, weekly_hour_limits, target_weekly_hours):
+def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, assign, weekly_hour_limits, target_weekly_hours, total_time, roles, department_roles, role_display_names):
     """
     Display the schedule in a readable format with statistics
     
@@ -782,6 +952,10 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
         assign: Role assignment variables
         weekly_hour_limits: Dictionary of weekly hour limits per employee
         target_weekly_hours: Dictionary of target hours per employee
+        total_time: Total wall-clock time for solving
+        roles: List of all roles including front desk
+        department_roles: List of non-front desk roles
+        role_display_names: Friendly names for printing per role
     """
     
     print("\n" + "=" * 120)
@@ -800,7 +974,8 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     # Print solver statistics
     print(f"\n✅ Solution found!")
     print(f"\nSolver Statistics:")
-    print(f"  - Solve time: {solver.wall_time:.2f} seconds")
+    print(f"  - Total execution time: {total_time:.2f} seconds")
+    print(f"  - Solver computation time: {solver.wall_time:.2f} seconds")
     print(f"  - Branches explored: {solver.num_branches:,}")
     print(f"  - Conflicts encountered: {solver.num_conflicts:,}")
     
@@ -815,33 +990,32 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
         print(f"{'─' * 120}")
         
         # Header row
-        print(f"\n{'Time':<12}", end="")
-        print(f"{'front_desks':<40}{'other_works':<40}")
-        print("─" * 92)
+        role_columns = ["front_desk"] + department_roles
+        column_width = 22
+        header = f"\n{'Time':<12}" + "".join(f"{role_display_names[role]:<{column_width}}" for role in role_columns)
+        print(header)
+        print("─" * (12 + column_width * len(role_columns)))
         
         # Data rows - one per time slot
         for t in T:
             time_slot = SLOT_NAMES[t]
             
-            # Find all front_desks working this slot
-            front_desks = [
-                e for e in employees
-                if (e, d, t, "front_desk") in assign 
-                and solver.value(assign[(e, d, t, "front_desk")])
-            ]
+            row = f"{time_slot:<12}"
+            for role in role_columns:
+                workers = [
+                    e for e in employees
+                    if (e, d, t, role) in assign
+                    and solver.value(assign[(e, d, t, role)])
+                ]
+                
+                if role == "front_desk":
+                    cell = ", ".join(workers) if workers else "❌ UNCOVERED"
+                else:
+                    cell = ", ".join(workers) if workers else "-"
+                
+                row += f"{cell:<{column_width}}"
             
-            # Find all other_works working this slot
-            other_works = [
-                e for e in employees
-                if (e, d, t, "other_work") in assign 
-                and solver.value(assign[(e, d, t, "other_work")])
-            ]
-            
-            # Format the output
-            front_desk_str = ", ".join(front_desks) if front_desks else "❌ UNCOVERED"
-            other_work_str = ", ".join(other_works) if other_works else "-"
-            
-            print(f"{time_slot:<12}{front_desk_str:<40}{other_work_str:<40}")
+            print(row)
     
     
     # ========================================================================
@@ -894,36 +1068,298 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     print("📊 ROLE DISTRIBUTION")
     print(f"{'=' * 120}\n")
     
-    total_front_desk_slots = 0
-    total_other_work_slots = 0
+    role_totals = {role: 0 for role in roles}
     
     for d in days:
-        front_desk_count = 0
-        other_work_count = 0
+        role_counts = {role: 0 for role in roles}
         
         # Count assignments for this day (in 30-minute slots)
         for t in T:
             for e in employees:
-                if (e, d, t, "front_desk") in assign and solver.value(assign[(e, d, t, "front_desk")]):
-                    front_desk_count += 1
-                if (e, d, t, "other_work") in assign and solver.value(assign[(e, d, t, "other_work")]):
-                    other_work_count += 1
+                for role in roles:
+                    if (e, d, t, role) in assign and solver.value(assign[(e, d, t, role)]):
+                        role_counts[role] += 1
         
-        total_front_desk_slots += front_desk_count
-        total_other_work_slots += other_work_count
+        for role in roles:
+            role_totals[role] += role_counts[role]
         
-        # Convert to hours for display
-        front_desk_hours = front_desk_count * 0.5
-        other_work_hours = other_work_count * 0.5
-        
-        print(f"{d}: {front_desk_hours:.1f} front_desk-hours, {other_work_hours:.1f} other_work-hours")
+        day_summary = ", ".join(
+            f"{role_display_names[role]} {role_counts[role] * 0.5:.1f}h"
+            for role in roles
+            if role_counts[role] > 0
+        ) or "No assignments"
+        print(f"{d}: {day_summary}")
     
-    # Convert totals to hours
-    total_front_desk_hours = total_front_desk_slots * 0.5
-    total_other_work_hours = total_other_work_slots * 0.5
+    print("\nTOTAL HOURS BY ROLE")
+    for role in roles:
+        print(f" - {role_display_names[role]}: {role_totals[role] * 0.5:.1f} hours")
     
-    print(f"\n{'TOTAL:':<4} {total_front_desk_hours:.1f} front_desk-hours, {total_other_work_hours:.1f} other_work-hours across the week")
     print("=" * 120 + "\n")
+
+
+def export_schedule_to_excel(
+    status,
+    solver,
+    employees,
+    days,
+    T,
+    SLOT_NAMES,
+    qual,
+    work,
+    assign,
+    weekly_hour_limits,
+    target_weekly_hours,
+    roles,
+    department_roles,
+    role_display_names,
+    output_path: Path = Path("schedule.xlsx"),
+):
+    """
+    Export the generated schedule to an Excel workbook with formatted sheets.
+    
+    This function runs after console printing to avoid impacting scheduling logic.
+    """
+    if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        return
+    
+    # Resolve writer engine dynamically
+    role_columns = ["front_desk"] + department_roles
+    
+    # Daily tables
+    daily_tables = []
+    for day in days:
+        columns = ["Time"] + [role_display_names[role] for role in role_columns]
+        rows = []
+        for t in T:
+            row = [SLOT_NAMES[t]]
+            for role in role_columns:
+                workers = [
+                    e
+                    for e in employees
+                    if (e, day, t, role) in assign and solver.value(assign[(e, day, t, role)])
+                ]
+                cell_value = ", ".join(workers) if workers else ("UNCOVERED" if role == "front_desk" else "")
+                row.append(cell_value)
+            rows.append(row)
+        daily_tables.append((f"{day} Schedule", columns, rows))
+    
+    # Employee summary data
+    summary_rows = []
+    for e in employees:
+        total_slots = 0
+        days_worked = []
+        for d in days:
+            day_slots = sum(solver.value(work[e, d, t]) for t in T)
+            if day_slots > 0:
+                total_slots += day_slots
+                days_worked.append(f"{d}({day_slots * 0.5:.1f}h)")
+        target_hours = target_weekly_hours.get(e, 0)
+        max_hours = weekly_hour_limits.get(e, 0)
+        total_hours = total_slots * 0.5
+        hit_target = abs(total_hours - target_hours) <= 0.5
+        summary_rows.append(
+            [
+                e,
+                ", ".join(sorted(qual[e])),
+                total_hours,
+                target_hours,
+                max_hours,
+                "✓" if hit_target else "",
+                ", ".join(days_worked) if days_worked else "None",
+            ]
+        )
+    summary_columns = [
+        "Employee",
+        "Qualifications",
+        "Hours Worked",
+        "Target Hours",
+        "Max Hours",
+        "Hit Target",
+        "Days Worked",
+    ]
+    
+    # Role distribution data
+    distribution_rows = []
+    role_totals = {role: 0 for role in roles}
+    for d in days:
+        row = [d]
+        for role in roles:
+            slot_count = sum(
+                solver.value(assign[(e, d, t, role)]) if (e, d, t, role) in assign else 0
+                for e in employees
+                for t in T
+            )
+            role_totals[role] += slot_count
+            row.append(slot_count * 0.5)
+        distribution_rows.append(row)
+    total_row = ["TOTAL"] + [role_totals[r] * 0.5 for r in roles]
+    distribution_rows.append(total_row)
+    distribution_columns = ["Day"] + [role_display_names[role] for role in roles]
+    
+    engine = None
+    for candidate in ("xlsxwriter", "openpyxl"):
+        if importlib.util.find_spec(candidate):
+            engine = candidate
+            break
+    
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    if engine:
+        with pd.ExcelWriter(output_path, engine=engine) as writer:
+            for sheet_name, columns, rows in daily_tables:
+                df_day = pd.DataFrame(rows, columns=columns)
+                df_day.to_excel(writer, sheet_name=sheet_name, index=False)
+                _autosize_columns(writer, sheet_name, df_day)
+            
+            df_summary = pd.DataFrame(summary_rows, columns=summary_columns)
+            df_summary.to_excel(writer, sheet_name="Employee Summary", index=False)
+            _autosize_columns(writer, "Employee Summary", df_summary)
+            
+            df_distribution = pd.DataFrame(distribution_rows, columns=distribution_columns)
+            df_distribution.to_excel(writer, sheet_name="Role Distribution", index=False)
+            _autosize_columns(writer, "Role Distribution", df_distribution)
+    else:
+        sheets_payload = []
+        for sheet_name, columns, rows in daily_tables:
+            sheets_payload.append((sheet_name, [columns] + rows))
+        sheets_payload.append(("Employee Summary", [summary_columns] + summary_rows))
+        sheets_payload.append(("Role Distribution", [distribution_columns] + distribution_rows))
+        _write_minimal_xlsx(output_path, sheets_payload)
+    
+    print(f"📁 Schedule exported to {output_path}")
+
+
+def _autosize_columns(writer: pd.ExcelWriter, sheet_name: str, dataframe: pd.DataFrame):
+    """Automatic column width helper for Excel export."""
+    worksheet = writer.sheets[sheet_name]
+    engine = getattr(writer, "engine", "").lower()
+    for idx, column in enumerate(dataframe.columns):
+        series = dataframe[column].astype(str)
+        max_length = max(series.map(len).max(), len(str(column)))
+        width = min(max_length + 2, 60)
+        if engine == "xlsxwriter":
+            worksheet.set_column(idx, idx, width)
+        elif engine == "openpyxl":
+            from openpyxl.utils import get_column_letter
+
+            worksheet.column_dimensions[get_column_letter(idx + 1)].width = width
+
+
+def _write_minimal_xlsx(output_path: Path, sheets: List[Tuple[str, List[List]]]):
+    """Fallback XLSX writer using only the Python standard library."""
+    from zipfile import ZipFile, ZIP_DEFLATED
+    from xml.sax.saxutils import escape
+
+    def col_letter(index: int) -> str:
+        result = ""
+        index += 1
+        while index:
+            index, remainder = divmod(index - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
+
+    def build_sheet_xml(rows: List[List]) -> str:
+        cells_xml = []
+        for row_idx, row in enumerate(rows, start=1):
+            cell_parts = []
+            for col_idx, value in enumerate(row):
+                if value in (None, ""):
+                    continue
+                cell_ref = f"{col_letter(col_idx)}{row_idx}"
+                if isinstance(value, (int, float)):
+                    cell_parts.append(f'<c r="{cell_ref}"><v>{value}</v></c>')
+                else:
+                    text = escape(str(value))
+                    cell_parts.append(
+                        f'<c r="{cell_ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+                    )
+            cell_xml = "".join(cell_parts)
+            row_xml = f'<row r="{row_idx}">{cell_xml}</row>' if cell_xml else f'<row r="{row_idx}"/>'
+            cells_xml.append(row_xml)
+        sheet_body = "".join(cells_xml)
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f"<sheetData>{sheet_body}</sheetData>"
+            "</worksheet>"
+        )
+
+    sanitized_sheets = []
+    for idx, (name, rows) in enumerate(sheets, start=1):
+        sheet_name = name[:31] if name else f"Sheet{idx}"
+        sanitized_sheets.append((sheet_name, rows))
+
+    workbook_rels = []
+    sheets_entries = []
+    content_types_overrides = []
+    sheet_files = []
+
+    for idx, (name, rows) in enumerate(sanitized_sheets, start=1):
+        sheet_filename = f"sheet{idx}.xml"
+        rel_id = f"rId{idx}"
+        workbook_rels.append(
+            f'<Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/{sheet_filename}"/>'
+        )
+        sheets_entries.append(f'<sheet name="{escape(name)}" sheetId="{idx}" r:id="{rel_id}"/>')
+        content_types_overrides.append(
+            f'<Override PartName="/xl/worksheets/{sheet_filename}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        )
+        sheet_files.append((f"xl/worksheets/{sheet_filename}", build_sheet_xml(rows)))
+
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        f'{"".join(content_types_overrides)}'
+        "</Types>"
+    )
+
+    rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f"<sheets>{''.join(sheets_entries)}</sheets>"
+        "</workbook>"
+    )
+
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'{"".join(workbook_rels)}'
+        "</Relationships>"
+    )
+
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<fonts count=\"1\"><font><sz val=\"11\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/></font></fonts>"
+        "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>"
+        "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"
+        "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
+        "<cellXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/></cellXfs>"
+        "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
+        "</styleSheet>"
+    )
+
+    with ZipFile(output_path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types_xml)
+        archive.writestr("_rels/.rels", rels_xml)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/styles.xml", styles_xml)
+        for filename, xml in sheet_files:
+            archive.writestr(filename, xml)
 
 # ============================================================================
 # PROGRAM ENTRY POINT

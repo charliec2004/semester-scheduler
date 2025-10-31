@@ -25,3 +25,10 @@ venv/
 
 # OS
 .DS_Store
+
+# Generated files
+*.xlsx
+
+# Notes
+questions.md
+notes.md

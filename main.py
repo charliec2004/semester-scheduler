@@ -20,7 +20,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, TypedDict
 
 import importlib.util
 import pandas as pd
@@ -45,6 +45,17 @@ SLOT_NAMES = [
 AVAILABILITY_COLUMNS = [f"{day}_{time}" for day in DAY_NAMES for time in TIME_SLOT_STARTS]
 FRONT_DESK_ROLE = "front_desk"
 DEPARTMENT_HOUR_THRESHOLD = 4  # +/- hours acceptable window
+
+
+class StaffData(TypedDict):
+    """Type definition for staff data returned by load_staff_data()"""
+    employees: List[str]
+    qual: Dict[str, Set[str]]
+    weekly_hour_limits: Dict[str, float]
+    target_weekly_hours: Dict[str, float]
+    employee_year: Dict[str, int]
+    unavailable: Dict[str, Dict[str, List[int]]]
+    roles: List[str]
 
 
 def _normalize_columns(df: pd.DataFrame) -> Dict[str, str]:
@@ -73,7 +84,7 @@ def _coerce_numeric(value, column_name: str, record_name: str) -> float:
         ) from None
 
 
-def load_staff_data(path: Path) -> Dict[str, object]:
+def load_staff_data(path: Path) -> StaffData:
     if not path.exists():
         raise FileNotFoundError(f"Staff CSV not found: {path}")
 

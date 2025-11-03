@@ -1004,8 +1004,8 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
     print("EMPLOYEE SUMMARY")
     print(f"{'=' * 120}\n")
     
-    print(f"{'Employee':<12}{'Qualifications':<25}{'Hours (Target/Max)':<25}{'Days Worked'}")
-    print("─" * 105)
+    print(f"{'Employee':<15}{'Qualifications':<35}{'Hours (Target/Max)':<30}{'Days Worked'}")
+    print("─" * 120)
     
     for e in employees:
         total_slots = 0
@@ -1035,7 +1035,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
         if abs(total_hours - target_hours) <= 0.5:  # Within 30 minutes
             hours_str = f"✓ {hours_str}"
         
-        print(f"{e:<12}{quals:<25}{hours_str:<25}{days_str}")
+        print(f"{e:<15}{quals:<35}{hours_str:<30}{days_str}")
     
     
     # ========================================================================

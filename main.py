@@ -609,6 +609,69 @@ def main():
     
     
     # ============================================================================
+    # STEP 9C: MINIMUM ROLE DURATION CONSTRAINT (ALL ROLES)
+    # ============================================================================
+    # Prevent employees from doing any role for less than 1 hour (2 slots)
+    # Example: Can't do front_desk 8am-10am, then marketing 10am-10:30am
+    # If you switch to a role, you must do it for at least 1 hour continuously
+    
+    # Create role start/end tracking variables for ALL roles
+    role_start = {
+        (e, d, t, r): model.new_bool_var(f"role_start[{e},{d},{t},{r}]")
+        for e in employees
+        for d in days
+        for t in T
+        for r in roles
+        if r in qual[e]
+    }
+    role_end = {
+        (e, d, t, r): model.new_bool_var(f"role_end[{e},{d},{t},{r}]")
+        for e in employees
+        for d in days
+        for t in T
+        for r in roles
+        if r in qual[e]
+    }
+    
+    for e in employees:
+        for d in days:
+            for r in roles:
+                if r not in qual[e]:
+                    continue
+                
+                # Enforce contiguous role assignment (can't toggle in and out of a role)
+                # At most one start and one end per role per day
+                model.add(sum(role_start.get((e, d, t, r), 0) for t in T) <= 1)
+                model.add(sum(role_end.get((e, d, t, r), 0) for t in T) <= 1)
+                model.add(
+                    sum(role_start.get((e, d, t, r), 0) for t in T) == 
+                    sum(role_end.get((e, d, t, r), 0) for t in T)
+                )
+                
+                # First slot boundary
+                if (e, d, 0, r) in assign:
+                    model.add(assign[(e, d, 0, r)] == role_start[(e, d, 0, r)])
+                
+                # Internal transitions
+                for t in T[1:]:
+                    if (e, d, t, r) in assign and (e, d, t-1, r) in assign:
+                        model.add(
+                            assign[(e, d, t, r)] - assign[(e, d, t-1, r)] == 
+                            role_start[(e, d, t, r)] - role_end[(e, d, t-1, r)]
+                        )
+                
+                # Last slot boundary
+                if (e, d, T[-1], r) in assign:
+                    model.add(role_end[(e, d, T[-1], r)] == assign[(e, d, T[-1], r)])
+                
+                # HARD CONSTRAINT: Minimum 1 hour (2 slots) per role assignment
+                total_role_slots = sum(assign.get((e, d, t, r), 0) for t in T)
+                
+                # Forbid single 30-minute slot for any role
+                model.add(total_role_slots != 1)
+    
+    
+    # ============================================================================
     # STEP 10: ADD COVERAGE REQUIREMENTS
     # ============================================================================
     # Ensure minimum staffing levels are met for each role
@@ -626,20 +689,19 @@ def main():
             model.add(num_front_desk >= 1).only_enforce_if(has_front_desk)
             model.add(num_front_desk == 0).only_enforce_if(has_front_desk.Not())
             
-            # IMPORTANT: Weight coverage based on time of day
-            # Earlier hours are MORE important than later hours
-            # This way if coverage must be dropped, it happens at end of day first
-            time_weight = 18 - t  # Earlier slots get higher weight (18, 17, 16, ... 1)
-            front_desk_coverage_score += time_weight * has_front_desk
+            # VERY STRONG SOFT CONSTRAINT: Front desk should be covered at all times
+            # We use MASSIVE weight (10000) to make this extremely high priority
+            # This is NOT a hard constraint - if truly impossible, solver can still find a solution
+            # But practically, front desk will only be uncovered if NO front-desk-qualified 
+            # employee is available at that time slot
+            front_desk_coverage_score += 10000 * has_front_desk
             
-            # HARD CONSTRAINT: At most 1 front desk at a time (no overstaffing)
+            # HARD CONSTRAINT: At most 1 front desk at a time (no overstaffing at front desk)
             model.add(num_front_desk <= 1)
             
-            # OPTIONAL CAP: keep departmental staffing reasonable relative to membership size
-            for role in department_roles:
-                model.add(
-                    sum(assign.get((e, d, t, role), 0) for e in employees) <= department_sizes[role]
-                )
+            # NOTE: Department roles CAN have multiple people working at the same time
+            # We removed the hard cap - instead we'll use soft constraints in the objective
+            # to encourage spreading people out throughout the week
     
     
     # ============================================================================
@@ -821,29 +883,130 @@ def main():
                     # Subtract the year value: freshmen (1) are least penalized
                     underclassmen_preference_score -= year * assign[(e, d, t, "front_desk")]
     
+    # ============================================================================
+    # DEPARTMENT SCARCITY PENALTY FOR FRONT DESK
+    # ============================================================================
+    # Prefer pulling people to front desk from departments with MORE qualified people
+    # (more options, more flexible scheduling) rather than departments with FEWER
+    # This protects scarce resources in small departments (Marketing=2, Employer Engagement=2)
+    # and lets bigger departments (Career Education=3, Events=3) contribute more to front desk
+    # 
+    # Scarcity score: Inverse of department size - smaller departments get higher penalty
+    # This takes precedence over seniority - spreading the wealth is the priority!
+    
+    department_scarcity_penalty = 0
+    
+    for e in employees:
+        # Find which non-front-desk departments this employee belongs to
+        employee_departments = [r for r in qual[e] if r != "front_desk" and r in department_roles]
+        
+        # Calculate scarcity: average inverse of department sizes for this employee's departments
+        # If employee is in multiple departments, use the SMALLEST department (most scarce)
+        if employee_departments:
+            # Get the smallest department size this employee belongs to
+            min_dept_size = min(department_sizes[dept] for dept in employee_departments)
+            
+            # Scarcity penalty: smaller department = higher penalty for using at front desk
+            # Dept size 2 = penalty 5 per slot (very scarce - avoid pulling them)
+            # Dept size 3 = penalty 3.33 per slot (moderately scarce)
+            # Dept size 4+ = penalty 2.5 or less per slot (plenty of people - okay to pull)
+            scarcity_factor = 10.0 / min_dept_size
+            
+            # Apply penalty for each front desk assignment
+            for d in days:
+                for t in T:
+                    if (e, d, t, "front_desk") in assign:
+                        # Penalize pulling scarce resources to front desk
+                        department_scarcity_penalty -= scarcity_factor * assign[(e, d, t, "front_desk")]
+    
+    # ============================================================================
+    # COLLABORATIVE HOURS TRACKING
+    # ============================================================================
+    # Track when multiple people work together in the same department (collaboration)
+    # We want to ENCOURAGE collaboration - it's good for teamwork and training!
+    # Note: Single 30-minute overlaps don't count - must be at least 1 hour together
+    
+    # Minimum collaborative hours per department
+    # These are SOFT targets - we'll try to hit them but won't fail if impossible
+    # Collaborative hours = time slots where 2+ people work the same role simultaneously
+    # SET YOUR VALUES HERE (in hours, will be converted to 30-min slots):
+    min_collaborative_hours = {
+        "career_education": 1,      #Set your value
+        "marketing": 1,             #Set your value
+        "internships": 1,           #Set your value
+        "employer_engagement": 2,   #Set your value
+        "events": 4,                #Set your value
+        "data_systems": 0,          # 0 because only 1 person (Diana)
+    }
+    
+    # Track collaborative slots per department
+    collaborative_slots = {}
+    for role in department_roles:
+        # Count slots where 2+ people work this role simultaneously
+        collab_slot_vars = []
+        for d in days:
+            for t in T:
+                # Count how many people are working this department role at this time
+                num_in_role = sum(assign.get((e, d, t, role), 0) for e in employees)
+                
+                # Create a boolean indicator: are there 2+ people in this role right now?
+                has_collaboration = model.new_bool_var(f"collab_{role}[{d},{t}]")
+                model.add(num_in_role >= 2).only_enforce_if(has_collaboration)
+                model.add(num_in_role <= 1).only_enforce_if(has_collaboration.Not())
+                
+                collab_slot_vars.append(has_collaboration)
+        
+        # Sum up total collaborative slots for this department
+        collaborative_slots[role] = sum(collab_slot_vars)
+    
+    # Calculate penalty for not meeting collaborative hour minimums
+    # This is a SOFT constraint - encourages collaboration but doesn't require it
+    collaborative_hours_score = 0
+    
+    for role in department_roles:
+        if role not in min_collaborative_hours:
+            continue
+        
+        min_slots = int(min_collaborative_hours[role] * 2)  # Convert hours to 30-min slots
+        
+        if min_slots == 0:
+            # No collaboration requirement for this department (e.g., data_systems with 1 person)
+            continue
+        
+        # Calculate how far we are from the minimum
+        under_collab = model.new_int_var(0, 200, f"under_collab[{role}]")
+        model.add(collaborative_slots[role] + under_collab >= min_slots)
+        
+        # Penalize being under the collaborative minimum
+        # Weight this moderately - less than department hours, more than individual preferences
+        collaborative_hours_score -= 50 * under_collab  # Weight 50 - significant but not critical
+    
     # Objective: Maximize coverage with priorities:
-    # 1. Front desk coverage (weight 1000) - CRITICAL but soft, prioritizes early hours
+    # 1. Front desk coverage (weight 10000) - EXTREMELY HIGH PRIORITY - virtually guarantees coverage
     # 2. Large deviation penalty (weight 1) - MASSIVE penalty for being 2+ hours off target (-5000 per person)
     # 3. Target adherence (weight 100) - STRONGLY encourage hitting target hours (graduated by year)
     # 4. Department spread (weight 60) - Prefer departmental presence across many time slots
     # 5. Department day coverage (weight 30) - Encourage each department to appear throughout the week
-    # 6. Department hour targets (weight 100) - Encourage departments to hit target hours
+    # 6. Department hour targets (weight 500) - Encourage departments to hit target hours
     # 7. Shift length preference (weight 20) - Gently prefer longer shifts (reduced to allow flexibility)
-    # 8. Underclassmen at front desk (weight 0.5) - VERY gentle nudge when all else equal
-    # 9. Total department hours (weight 1) - Fill available departmental capacity
-    # Note: Front desk coverage is heavily weighted but NOT a hard constraint
-    #       If impossible to cover all hours, later hours drop first (due to time_weight)
+    # 8. Department scarcity penalty (weight 2) - Prefer pulling from richer departments to front desk
+    # 9. Underclassmen at front desk (weight 0.5) - VERY gentle nudge when all else equal
+    # 10. Total department hours (weight 1) - Fill available departmental capacity
+    # Note: Front desk weight is 10x larger than before - will only be uncovered if IMPOSSIBLE
+    #       (i.e., no front-desk-qualified employee available at that time slot)
     model.maximize(
-        1000 * front_desk_coverage_score +   # Prioritize front desk coverage with time weighting
+        front_desk_coverage_score +          # Weight 10000 per slot - EXTREMELY high priority
         large_deviation_penalty +            # MASSIVE penalty for 2+ hour deviations (-5000 per person)
+        500 * department_target_score +      # Weight 500 - prioritize department hours!
+        department_large_deviation_penalty + # Severe penalty for large department deviations (-4000)
         100 * target_adherence_score +       # Strongly encourage target hour adherence
         60 * department_spread_score +
+        collaborative_hours_score +          # Weight 50 - encourage collaboration
         30 * department_day_coverage_score +
-        100 * department_target_score +
         20 * shift_length_bonus +            # Reduced to allow more flexibility for hour distribution
+        2 * department_scarcity_penalty +    # Weight 2 - SLIGHT preference for pulling from richer departments
         0.5 * underclassmen_preference_score + # VERY gentle - only matters when everything else equal
-        total_department_assignments +
-        department_large_deviation_penalty
+        total_department_assignments         # Fill available departmental capacity
     )
     
     
@@ -1073,18 +1236,40 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
         print(f"{d}: {day_summary}")
     
     print("\nTOTAL HOURS BY ROLE")
+    print("─" * 90)
+    print(f"{'Role':<25}{'Actual':<12}{'Target':<12}{'Max':<12}{'Delta':<12}{'Status'}")
+    print("─" * 90)
+    
     for role in roles:
         actual_hours = role_totals[role] * 0.5
         target = department_hour_targets.get(role)
         max_hours = department_max_hours.get(role)
-        extras = []
+        
+        # Format columns
+        role_name = role_display_names[role]
+        actual_str = f"{actual_hours:.1f}h"
+        target_str = f"{target:.1f}h" if target is not None else "-"
+        max_str = f"{max_hours:.1f}h" if max_hours is not None else "-"
+        
+        # Calculate delta and status
         if target is not None:
-            extras.append(f"target {target:.1f}")
-            extras.append(f"Δ {actual_hours - target:+.1f}")
-        if max_hours is not None:
-            extras.append(f"max {max_hours:.1f}")
-        details = f" ({', '.join(extras)})" if extras else ""
-        print(f" - {role_display_names[role]}: {actual_hours:.1f} hours{details}")
+            delta = actual_hours - target
+            delta_str = f"{delta:+.1f}h"
+            
+            # Determine status with emoji/symbol
+            if abs(delta) <= 1.0:  # Within 1 hour
+                status = "✓ On Target"
+            elif delta > 0:
+                status = "↑ Over"
+            else:
+                status = "↓ Under"
+        else:
+            delta_str = "-"
+            status = "-"
+        
+        print(f"{role_name:<25}{actual_str:<12}{target_str:<12}{max_str:<12}{delta_str:<12}{status}")
+    
+    print("─" * 90)
     
     print("=" * 120 + "\n")
 

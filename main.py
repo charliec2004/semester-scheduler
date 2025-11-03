@@ -597,11 +597,15 @@ def main():
             
             model.add(frontdesk_end[e, d, T[-1]] == assign[(e, d, T[-1], "front_desk")])
             
+            # HARD CONSTRAINT: Front desk minimum 2 hours (4 slots) if working it at all
+            # This prevents short front desk stints like 30min or 1 hour
             total_front_desk_slots = sum(assign[(e, d, t, "front_desk")] for t in T)
-            works_front_desk_today = model.new_bool_var(f"works_front_desk_today[{e},{d}]")
-            model.add(total_front_desk_slots >= 1).only_enforce_if(works_front_desk_today)
-            model.add(total_front_desk_slots == 0).only_enforce_if(works_front_desk_today.Not())
-            model.add(total_front_desk_slots >= MIN_FRONT_DESK_SLOTS).only_enforce_if(works_front_desk_today)
+            
+            # NUCLEAR OPTION: Explicitly forbid 1, 2, or 3 slot front desk shifts
+            # Total front desk slots must be EITHER 0 (not working front desk) OR >= 4 (minimum 2 hours)
+            model.add(total_front_desk_slots != 1)  # Not 30 minutes
+            model.add(total_front_desk_slots != 2)  # Not 1 hour
+            model.add(total_front_desk_slots != 3)  # Not 1.5 hours
     
     
     # ============================================================================

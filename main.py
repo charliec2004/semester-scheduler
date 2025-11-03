@@ -986,8 +986,10 @@ def main():
     # ============================================================================
     # Track how many people are working (in ANY role) at each time slot
     # We want front desk (1 person) + at least 1 department worker = 2+ total
+    # CRITICAL: Having only 1 person (front desk alone) is risky - no backup if they get sick!
     
     office_coverage_score = 0
+    single_coverage_penalty = 0  # NEW: penalty for having only 1 person
     
     for d in days:
         for t in T:
@@ -999,7 +1001,18 @@ def main():
             
             # Encourage having at least 2 people in the office
             # Reward each person beyond 1 (so 2 people = +1 bonus, 3 people = +2 bonus, etc.)
-            office_coverage_score += total_people - 1  # Will be multiplied by weight in objective
+            office_coverage_score += total_people - 1
+            
+            # NEW: Heavy penalty if only 1 person in office (front desk alone - very risky!)
+            # Create a boolean variable for "only 1 person working"
+            only_one_person = model.new_bool_var(f"only_one_{d}_{t}")
+            
+            # If total_people == 1, then only_one_person = 1, otherwise 0
+            model.add(total_people == 1).only_enforce_if(only_one_person)
+            model.add(total_people != 1).only_enforce_if(only_one_person.Not())
+            
+            # Apply penalty for single coverage
+            single_coverage_penalty -= only_one_person  # Will be multiplied by weight in objective
     
     # Objective: Maximize coverage with priorities:
     # 1. Front desk coverage (weight 10000) - EXTREMELY HIGH PRIORITY - virtually guarantees coverage
@@ -1007,6 +1020,7 @@ def main():
     # 3. Department target hours (weight 1000) - DOUBLED to prioritize department hours
     # 4. Collaborative hours (weight 200) - STRONGLY encourage collaboration
     # 5. Office coverage (weight 150) - Encourage 2+ people in office at all times
+    # 5b. Single coverage penalty (weight 500) - HEAVILY discourage only 1 person in office (risky!)
     # 6. Target adherence (weight 100) - STRONGLY encourage hitting target hours (graduated by year)
     # 7. Department spread (weight 60) - Prefer departmental presence across many time slots
     # 8. Department day coverage (weight 30) - Encourage each department to appear throughout the week
@@ -1023,6 +1037,7 @@ def main():
         department_large_deviation_penalty + # Severe penalty for large department deviations (-4000)
         200 * collaborative_hours_score +    # Weight 200 - STRONGLY encourage collaboration
         150 * office_coverage_score +        # Weight 150 - encourage 2+ people in office at all times
+        500 * single_coverage_penalty +      # Weight 500 - HEAVILY penalize only 1 person (risky!)
         100 * target_adherence_score +       # Strongly encourage target hour adherence
         60 * department_spread_score +
         30 * department_day_coverage_score +

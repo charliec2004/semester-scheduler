@@ -241,7 +241,7 @@ def main():
             args.requirements_csv
         )
     except Exception as exc:
-        print(f"❌ {exc}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
     
     # ============================================================================
@@ -265,7 +265,7 @@ def main():
     days = DAY_NAMES[:]
     roles = list(staff_data["roles"])
     if FRONT_DESK_ROLE not in roles:
-        print(f"❌ Role '{FRONT_DESK_ROLE}' is required but missing from staff data.", file=sys.stderr)
+        print(f"ERROR: Role '{FRONT_DESK_ROLE}' is required but missing from staff data.", file=sys.stderr)
         sys.exit(1)
     roles = [FRONT_DESK_ROLE] + [role for role in roles if role != FRONT_DESK_ROLE]
     department_roles = [role for role in roles if role != FRONT_DESK_ROLE]
@@ -273,15 +273,15 @@ def main():
     missing_targets = [role for role in department_roles if role not in department_hour_targets_raw]
     missing_max = [role for role in department_roles if role not in department_max_hours_raw]
     if missing_targets:
-        print(f"❌ Department targets missing for: {', '.join(missing_targets)}", file=sys.stderr)
+        print(f"ERROR: Department targets missing for: {', '.join(missing_targets)}", file=sys.stderr)
         sys.exit(1)
     if missing_max:
-        print(f"❌ Department max hours missing for: {', '.join(missing_max)}", file=sys.stderr)
+        print(f"ERROR: Department max hours missing for: {', '.join(missing_max)}", file=sys.stderr)
         sys.exit(1)
     extra_departments = [dept for dept in department_hour_targets_raw if dept not in roles]
     if extra_departments:
-        print(f"⚠️  Ignoring department requirements with no matching role: {', '.join(extra_departments)}", file=sys.stderr)
-    
+        print(f"WARNING: Ignoring department requirements with no matching role: {', '.join(extra_departments)}", file=sys.stderr)
+
     department_hour_targets = {
         role: float(department_hour_targets_raw[role])
         for role in department_roles
@@ -299,7 +299,7 @@ def main():
     zero_capacity_departments = [role for role, size in department_sizes.items() if size == 0]
     if zero_capacity_departments:
         print(
-            "❌ No qualified employees found for departments: "
+            "ERROR: No qualified employees found for departments: "
             + ", ".join(zero_capacity_departments),
             file=sys.stderr,
         )
@@ -987,7 +987,7 @@ def print_schedule(status, solver, employees, days, T, SLOT_NAMES, qual, work, a
                 ]
                 
                 if role == "front_desk":
-                    cell = ", ".join(workers) if workers else "❌ UNCOVERED"
+                    cell = ", ".join(workers) if workers else "ERROR: UNCOVERED"
                 else:
                     cell = ", ".join(workers) if workers else "-"
                 

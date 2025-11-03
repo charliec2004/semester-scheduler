@@ -19,11 +19,11 @@ This scheduler uses **Google OR-Tools CP-SAT Solver** (Constraint Programming) t
 
 These are **absolute requirements** that must be satisfied for any valid schedule:
 
-### 1. Front Desk Coverage
+### 1. Front Desk Maximum Capacity
 
-- **Exactly 1 person** at front desk at all times
-- Cannot have 0 people (coverage required)
-- Cannot have 2+ people (wasted resources)
+- **Maximum 1 person** at front desk at any time
+- Cannot have 2+ people (prevents resource waste)
+- **Note**: Minimum coverage (at least 1 person) is handled as a soft constraint - see Priority #1 below
 
 ### 2. Employee Availability
 
@@ -67,7 +67,7 @@ These are **preferences** optimized through weighted scoring. Higher weight = hi
 
 ### Priority Hierarchy (Highest to Lowest)
 
-#### **1. Front Desk Coverage** 
+#### **1. Front Desk Coverage**
 
 **Weight: 10,000 per slot**
 

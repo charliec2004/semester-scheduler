@@ -978,8 +978,8 @@ def main():
         model.add(collaborative_slots[role] + under_collab >= min_slots)
         
         # Penalize being under the collaborative minimum
-        # Weight this moderately - less than department hours, more than individual preferences
-        collaborative_hours_score -= 50 * under_collab  # Weight 50 - significant but not critical
+        # Increased penalty to make collaboration a higher priority
+        collaborative_hours_score -= under_collab  # Will be multiplied by 200 in objective function
     
     # Objective: Maximize coverage with priorities:
     # 1. Front desk coverage (weight 10000) - EXTREMELY HIGH PRIORITY - virtually guarantees coverage
@@ -999,9 +999,9 @@ def main():
         large_deviation_penalty +            # MASSIVE penalty for 2+ hour deviations (-5000 per person)
         500 * department_target_score +      # Weight 500 - prioritize department hours!
         department_large_deviation_penalty + # Severe penalty for large department deviations (-4000)
+        200 * collaborative_hours_score +    # Weight 200 - STRONGLY encourage collaboration (increased from 50)
         100 * target_adherence_score +       # Strongly encourage target hour adherence
         60 * department_spread_score +
-        collaborative_hours_score +          # Weight 50 - encourage collaboration
         30 * department_day_coverage_score +
         20 * shift_length_bonus +            # Reduced to allow more flexibility for hour distribution
         2 * department_scarcity_penalty +    # Weight 2 - SLIGHT preference for pulling from richer departments
@@ -1015,7 +1015,7 @@ def main():
     # ============================================================================
     
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 60  # Increased to 60 seconds for better optimization
+    solver.parameters.max_time_in_seconds = 120  # Increased to 120 seconds for better optimization
     
     print("Solving the scheduling problem...")
     print(f"   - {len(employees)} employees")

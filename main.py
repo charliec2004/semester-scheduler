@@ -981,31 +981,54 @@ def main():
         # Increased penalty to make collaboration a higher priority
         collaborative_hours_score -= under_collab  # Will be multiplied by 200 in objective function
     
+    # ============================================================================
+    # OFFICE COVERAGE - Encourage at least 2 people in office at all times
+    # ============================================================================
+    # Track how many people are working (in ANY role) at each time slot
+    # We want front desk (1 person) + at least 1 department worker = 2+ total
+    
+    office_coverage_score = 0
+    
+    for d in days:
+        for t in T:
+            # Count total people working at this time slot (any role)
+            total_people = sum(assign.get((e, d, t, r), 0) 
+                             for e in employees 
+                             for r in roles 
+                             if (e, d, t, r) in assign)
+            
+            # Encourage having at least 2 people in the office
+            # Reward each person beyond 1 (so 2 people = +1 bonus, 3 people = +2 bonus, etc.)
+            office_coverage_score += total_people - 1  # Will be multiplied by weight in objective
+    
     # Objective: Maximize coverage with priorities:
     # 1. Front desk coverage (weight 10000) - EXTREMELY HIGH PRIORITY - virtually guarantees coverage
     # 2. Large deviation penalty (weight 1) - MASSIVE penalty for being 2+ hours off target (-5000 per person)
-    # 3. Target adherence (weight 100) - STRONGLY encourage hitting target hours (graduated by year)
-    # 4. Department spread (weight 60) - Prefer departmental presence across many time slots
-    # 5. Department day coverage (weight 30) - Encourage each department to appear throughout the week
-    # 6. Department hour targets (weight 500) - Encourage departments to hit target hours
-    # 7. Shift length preference (weight 20) - Gently prefer longer shifts (reduced to allow flexibility)
-    # 8. Department scarcity penalty (weight 2) - Prefer pulling from richer departments to front desk
-    # 9. Underclassmen at front desk (weight 0.5) - VERY gentle nudge when all else equal
-    # 10. Total department hours (weight 1) - Fill available departmental capacity
+    # 3. Department target hours (weight 1000) - DOUBLED to prioritize department hours
+    # 4. Collaborative hours (weight 200) - STRONGLY encourage collaboration
+    # 5. Office coverage (weight 150) - Encourage 2+ people in office at all times
+    # 6. Target adherence (weight 100) - STRONGLY encourage hitting target hours (graduated by year)
+    # 7. Department spread (weight 60) - Prefer departmental presence across many time slots
+    # 8. Department day coverage (weight 30) - Encourage each department to appear throughout the week
+    # 9. Shift length preference (weight 20) - Gently prefer longer shifts (reduced to allow flexibility)
+    # 10. Department scarcity penalty (weight 8) - Prefer pulling from richer departments to front desk
+    # 11. Underclassmen at front desk (weight 3) - Moderate preference for freshmen at front desk
+    # 12. Total department hours (weight 1) - Fill available departmental capacity
     # Note: Front desk weight is 10x larger than before - will only be uncovered if IMPOSSIBLE
     #       (i.e., no front-desk-qualified employee available at that time slot)
     model.maximize(
         front_desk_coverage_score +          # Weight 10000 per slot - EXTREMELY high priority
         large_deviation_penalty +            # MASSIVE penalty for 2+ hour deviations (-5000 per person)
-        500 * department_target_score +      # Weight 500 - prioritize department hours!
+        1000 * department_target_score +     # Weight 1000 - DOUBLED to prioritize department hours! (was 500)
         department_large_deviation_penalty + # Severe penalty for large department deviations (-4000)
-        200 * collaborative_hours_score +    # Weight 200 - STRONGLY encourage collaboration (increased from 50)
+        200 * collaborative_hours_score +    # Weight 200 - STRONGLY encourage collaboration
+        150 * office_coverage_score +        # Weight 150 - encourage 2+ people in office at all times
         100 * target_adherence_score +       # Strongly encourage target hour adherence
         60 * department_spread_score +
         30 * department_day_coverage_score +
         20 * shift_length_bonus +            # Reduced to allow more flexibility for hour distribution
-        2 * department_scarcity_penalty +    # Weight 2 - SLIGHT preference for pulling from richer departments
-        0.5 * underclassmen_preference_score + # VERY gentle - only matters when everything else equal
+        8 * department_scarcity_penalty +    # Weight 8 - Protect small departments from over-use at front desk
+        3 * underclassmen_preference_score + # Weight 3 - Moderate preference for freshmen at front desk
         total_department_assignments         # Fill available departmental capacity
     )
     

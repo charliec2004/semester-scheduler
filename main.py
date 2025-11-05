@@ -933,7 +933,6 @@ def main():
     min_collaborative_hours = {
         "career_education": 1,      #Set your value
         "marketing": 1,             #Set your value
-        "internships": 1,           #Set your value
         "employer_engagement": 2,   #Set your value
         "events": 4,                #Set your value
         "data_systems": 0,          # 0 because only 1 person (Diana)
@@ -1014,6 +1013,25 @@ def main():
             # Apply penalty for single coverage
             single_coverage_penalty -= only_one_person  # Will be multiplied by weight in objective
     
+    # ============================================================================
+    # TIME OF DAY PREFERENCE - Very slight favor toward morning staffing
+    # ============================================================================
+    # Slightly prefer having more people working in morning hours (8am-12pm)
+    # This is a VERY gentle nudge - only matters when everything else is equal
+    # Helps avoid scenarios where afternoons are understaffed relative to mornings
+    
+    morning_preference_score = 0
+    morning_slots = [t for t in T if t < 8]  # Slots 0-7 = 8:00am-12:00pm (4 hours)
+    
+    for d in days:
+        for t in morning_slots:
+            # Count people working in morning time slots
+            morning_workers = sum(assign.get((e, d, t, r), 0) 
+                                for e in employees 
+                                for r in roles 
+                                if (e, d, t, r) in assign)
+            morning_preference_score += morning_workers
+    
     # Objective: Maximize coverage with priorities:
     # 1. Front desk coverage (weight 10000) - EXTREMELY HIGH PRIORITY - virtually guarantees coverage
     # 2. Large deviation penalty (weight 1) - MASSIVE penalty for being 2+ hours off target (-5000 per person)
@@ -1027,7 +1045,8 @@ def main():
     # 9. Shift length preference (weight 20) - Gently prefer longer shifts (reduced to allow flexibility)
     # 10. Department scarcity penalty (weight 8) - Prefer pulling from richer departments to front desk
     # 11. Underclassmen at front desk (weight 3) - Moderate preference for freshmen at front desk
-    # 12. Total department hours (weight 1) - Fill available departmental capacity
+    # 12. Morning preference (weight 0.5) - VERY slight favor toward morning staffing (tiebreaker only)
+    # 13. Total department hours (weight 1) - Fill available departmental capacity
     # Note: Front desk weight is 10x larger than before - will only be uncovered if IMPOSSIBLE
     #       (i.e., no front-desk-qualified employee available at that time slot)
     model.maximize(
@@ -1044,6 +1063,7 @@ def main():
         20 * shift_length_bonus +            # Reduced to allow more flexibility for hour distribution
         8 * department_scarcity_penalty +    # Weight 8 - Protect small departments from over-use at front desk
         3 * underclassmen_preference_score + # Weight 3 - Moderate preference for freshmen at front desk
+        0.5 * morning_preference_score +     # Weight 0.5 - VERY gentle morning preference (tiebreaker)
         total_department_assignments         # Fill available departmental capacity
     )
     

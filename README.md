@@ -17,7 +17,7 @@ Constraint-programming workflow that builds optimal weekly rosters for Chapman U
 - Python 3.12 (see `.python-version`)
 - Packages listed in `requirements.txt` (includes `ortools`, `pandas`, `numpy`, etc.)
 
-## Usage
+## Get Started
 
 ```bash
 python -m venv venv

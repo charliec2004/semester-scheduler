@@ -12,3 +12,4 @@ pytz==2025.2
 six==1.17.0
 typing_extensions==4.15.0
 tzdata==2025.2
+pytest>=7.0.0

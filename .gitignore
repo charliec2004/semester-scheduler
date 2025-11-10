@@ -33,3 +33,7 @@ venv/
 # Notes
 questions.md
 notes.md
+
+# Real files
+cpd-requirements.csv
+employees.csv

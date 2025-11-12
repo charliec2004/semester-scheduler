@@ -4,19 +4,9 @@ Tests for CSV data loading and validation.
 Simple tests that verify data loading functions work correctly.
 """
 
-import sys
-from pathlib import Path
-import tempfile
-
-# Add parent directory to path to import main module
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from main import (
-    _normalize_columns,
-    _parse_roles,
-    _coerce_numeric,
-)
 import pandas as pd
+
+from scheduler.data_access.staff_loader import _coerce_numeric, _normalize_columns, _parse_roles
 
 
 def test_normalize_basic_columns():
@@ -78,4 +68,3 @@ def test_coerce_invalid_raises_error():
         assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "Invalid numeric value" in str(e)
-

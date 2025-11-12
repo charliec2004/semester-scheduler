@@ -4,18 +4,7 @@ Tests for scheduling constraint logic.
 Simple tests that verify basic configuration and concepts.
 """
 
-import sys
-from pathlib import Path
-
-# Add parent directory to path to import main module
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from main import (
-    DAY_NAMES,
-    TIME_SLOT_STARTS,
-    SLOT_NAMES,
-    FRONT_DESK_ROLE,
-)
+from scheduler.config import DAY_NAMES, FRONT_DESK_ROLE, SLOT_NAMES, TIME_SLOT_STARTS
 
 
 def test_day_names_count():
@@ -61,4 +50,3 @@ def test_slot_duration():
     total_hours = 9.0
     hours_per_slot = total_hours / len(TIME_SLOT_STARTS)
     assert hours_per_slot == 0.5
-

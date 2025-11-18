@@ -507,13 +507,25 @@ def solve_schedule(
         )
         for role in department_roles
     }
-    total_department_assignments = sum(department_assignments.values())
-    department_max_slots = {
-        role: int(round(department_max_hours[role] * 2))
+    front_desk_slots_by_employee = {
+        e: sum(assign.get((e, d, t, FRONT_DESK_ROLE), 0) for d in days for t in T)
+        for e in employees
+    }
+    dual_front_desk_slots = {
+        role: sum(front_desk_slots_by_employee[e] for e in employees if role in qual[e])
+        for role in department_roles
+    }
+    department_effective_units = {
+        role: 2 * department_assignments[role] + dual_front_desk_slots[role]
+        for role in department_roles
+    }
+    total_department_units = sum(department_effective_units.values())
+    department_max_units = {
+        role: int(round(department_max_hours[role] * 4))
         for role in department_roles
     }
     for role in department_roles:
-        model.add(department_assignments[role] <= department_max_slots[role])
+        model.add(department_effective_units[role] <= department_max_units[role])
     
     # Calculate "spread" metric for each department: count how many time slots have at least 1 worker
     # This encourages distribution throughout the day rather than clustering
@@ -542,7 +554,7 @@ def solve_schedule(
     # Encourage departments to hit target weekly hours (soft constraint)
     department_target_score = 0
     department_large_deviation_penalty = 0
-    threshold_slots = department_hour_threshold * 2
+    threshold_units = department_hour_threshold * 4
 
     for role in department_roles:
         target_hours = department_hour_targets.get(role)
@@ -551,24 +563,24 @@ def solve_schedule(
         max_capacity_hours = sum(weekly_hour_limits.get(e, 0) for e in employees if role in qual[e])
         max_requirement_hours = department_max_hours.get(role, max_capacity_hours)
         adjusted_target_hours = min(target_hours, max_capacity_hours, max_requirement_hours)
-        target_slots = int(adjusted_target_hours * 2)
-        total_role_slots = department_assignments[role]
+        target_units = int(adjusted_target_hours * 4)
+        total_role_units = department_effective_units[role]
 
-        over = model.new_int_var(0, 200, f"department_over[{role}]")
-        under = model.new_int_var(0, 200, f"department_under[{role}]")
-        model.add(total_role_slots == target_slots + over - under)
+        over = model.new_int_var(0, 400, f"department_over[{role}]")
+        under = model.new_int_var(0, 400, f"department_under[{role}]")
+        model.add(total_role_units == target_units + over - under)
 
         department_target_score -= over + under
 
-        if threshold_slots > 0:
+        if threshold_units > 0:
             large_over = model.new_bool_var(f"department_large_over[{role}]")
             large_under = model.new_bool_var(f"department_large_under[{role}]")
 
-            model.add(over >= threshold_slots).only_enforce_if(large_over)
-            model.add(over < threshold_slots).only_enforce_if(large_over.Not())
+            model.add(over >= threshold_units).only_enforce_if(large_over)
+            model.add(over < threshold_units).only_enforce_if(large_over.Not())
 
-            model.add(under >= threshold_slots).only_enforce_if(large_under)
-            model.add(under < threshold_slots).only_enforce_if(large_under.Not())
+            model.add(under >= threshold_units).only_enforce_if(large_under)
+            model.add(under < threshold_units).only_enforce_if(large_under.Not())
 
             department_large_deviation_penalty -= DEPARTMENT_LARGE_DEVIATION_PENALTY * (large_over + large_under)
     
@@ -831,7 +843,7 @@ def solve_schedule(
         OBJECTIVE_WEIGHTS.department_scarcity * department_scarcity_penalty +
         OBJECTIVE_WEIGHTS.underclassmen_front_desk * underclassmen_preference_score +
         OBJECTIVE_WEIGHTS.morning_preference * morning_preference_score +
-        OBJECTIVE_WEIGHTS.department_total * total_department_assignments
+        OBJECTIVE_WEIGHTS.department_total * total_department_units
     )
     
     

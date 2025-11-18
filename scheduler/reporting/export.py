@@ -11,6 +11,7 @@ import pandas as pd
 from ortools.sat.python import cp_model
 
 from scheduler.config import FRONT_DESK_ROLE
+from scheduler.reporting.stats import aggregate_department_hours
 
 
 def export_schedule_to_excel(
@@ -105,16 +106,24 @@ def export_schedule_to_excel(
     distribution_rows.append(total_row)
     distribution_columns = ["Day"] + [role_display_names[role] for role in roles]
 
+    _, _, department_breakdown = aggregate_department_hours(
+        solver, employees, days, time_slots, assign, department_roles, qual
+    )
+
     dept_summary_headers = [
         "Department",
         "Actual Hours",
         "Target Hours",
         "Max Hours",
         "Delta (Actual-Target)",
+        "Focused Hours",
+        "Dual Hours Total",
+        "Dual Hours Counted",
     ]
     dept_summary_rows = []
     for role in department_roles:
-        actual_hours = role_totals[role] * 0.5
+        stats = department_breakdown[role]
+        actual_hours = stats["actual_hours"]
         target = department_hour_targets.get(role)
         max_hours = department_max_hours.get(role)
         delta = actual_hours - target if target is not None else ""
@@ -125,6 +134,9 @@ def export_schedule_to_excel(
                 target if target is not None else "",
                 max_hours if max_hours is not None else "",
                 delta,
+                stats["focused_hours"],
+                stats["dual_hours_total"],
+                stats["dual_hours_counted"],
             ]
         )
 

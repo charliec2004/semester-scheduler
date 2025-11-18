@@ -5,6 +5,7 @@ from __future__ import annotations
 from ortools.sat.python import cp_model
 
 from scheduler.config import FRONT_DESK_ROLE
+from scheduler.reporting.stats import aggregate_department_hours
 
 
 def print_schedule(
@@ -136,16 +137,43 @@ def print_schedule(
         print(f"{d}: {day_summary}")
 
     print("\nTOTAL HOURS BY ROLE")
-    print("─" * 90)
-    print(f"{'Role':<25}{'Actual':<12}{'Target':<12}{'Max':<12}{'Delta':<12}{'Status'}")
-    print("─" * 90)
+    print("─" * 140)
+    print(
+        f"{'Role':<25}"
+        f"{'Actual':<12}"
+        f"{'Target':<12}"
+        f"{'Max':<12}"
+        f"{'Delta':<12}"
+        f"{'Dual Hours':<14}"
+        f"{'Dual Counted':<15}"
+        f"{'Focused':<12}"
+        f"{'Status'}"
+    )
+    print("─" * 140)
+
+    role_direct_slots, _, department_breakdown = aggregate_department_hours(
+        solver, employees, days, time_slots, assign, department_roles, qual
+    )
 
     for role in roles:
-        actual_hours = role_totals[role] * 0.5
-        target = department_hour_targets.get(role)
-        max_hours = department_max_hours.get(role)
-
         role_name = role_display_names[role]
+
+        if role == FRONT_DESK_ROLE:
+            actual_hours = role_direct_slots[role] * 0.5
+            target = department_hour_targets.get(role)
+            max_hours = department_max_hours.get(role)
+            dual_hours = "-"
+            dual_counted = "-"
+            focused_hours = f"{actual_hours:.1f}h"
+        else:
+            stats = department_breakdown[role]
+            actual_hours = stats["actual_hours"]
+            target = department_hour_targets.get(role)
+            max_hours = department_max_hours.get(role)
+            dual_hours = f"{stats['dual_hours_total']:.1f}h"
+            dual_counted = f"{stats['dual_hours_counted']:.1f}h"
+            focused_hours = f"{stats['focused_hours']:.1f}h"
+
         actual_str = f"{actual_hours:.1f}h"
         target_str = f"{target:.1f}h" if target is not None else "-"
         max_str = f"{max_hours:.1f}h" if max_hours is not None else "-"
@@ -164,5 +192,14 @@ def print_schedule(
             delta_str = "-"
             status = "-"
 
-        print(f"{role_name:<25}{actual_str:<12}{target_str:<12}{max_str:<12}{delta_str:<12}{status}")
-
+        print(
+            f"{role_name:<25}"
+            f"{actual_str:<12}"
+            f"{target_str:<12}"
+            f"{max_str:<12}"
+            f"{delta_str:<12}"
+            f"{dual_hours:<14}"
+            f"{dual_counted:<15}"
+            f"{focused_hours:<12}"
+            f"{status}"
+        )

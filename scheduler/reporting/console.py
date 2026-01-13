@@ -26,6 +26,7 @@ def print_schedule(
     role_display_names,
     department_hour_targets,
     department_max_hours,
+    primary_frontdesk_department,
 ):
     """
     Display the schedule in a readable format with statistics.
@@ -152,7 +153,7 @@ def print_schedule(
     print("─" * 140)
 
     role_direct_slots, _, department_breakdown = aggregate_department_hours(
-        solver, employees, days, time_slots, assign, department_roles, qual
+        solver, employees, days, time_slots, assign, department_roles, qual, primary_frontdesk_department
     )
 
     for role in roles:

@@ -15,6 +15,7 @@ def aggregate_department_hours(
     assign,
     department_roles: List[str],
     qual: Dict[str, set],
+    primary_frontdesk_department: Dict[str, str] | None = None,
 ) -> Tuple[Dict[str, int], Dict[str, int], Dict[str, Dict[str, float]]]:
     """
     Aggregate focused/dual hours for each department based on a solved schedule.
@@ -42,9 +43,14 @@ def aggregate_department_hours(
 
     dual_slots_by_role: Dict[str, int] = {role: 0 for role in department_roles}
     for e, fd_slots in front_desk_slots_by_employee.items():
-        for role in department_roles:
-            if role in qual[e]:
-                dual_slots_by_role[role] += fd_slots
+        primary = (primary_frontdesk_department or {}).get(e)
+        if primary and primary in department_roles:
+            dual_slots_by_role[primary] += fd_slots
+        else:
+            # Fallback: credit to all qualified departments if no primary provided
+            for role in department_roles:
+                if role in qual[e]:
+                    dual_slots_by_role[role] += fd_slots
 
     department_breakdown: Dict[str, Dict[str, float]] = {}
     for role in department_roles:

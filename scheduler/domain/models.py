@@ -29,3 +29,31 @@ class ScheduleRequest:
     staff_csv: Path
     requirements_csv: Path
     output_path: Path
+
+
+@dataclass(frozen=True)
+class TrainingRequest:
+    department: str
+    trainee_one: str
+    trainee_two: str
+
+
+@dataclass(frozen=True)
+class TimesetRequest:
+    employee: str
+    day: str
+    department: str
+    start_slot: int
+    end_slot: int
+
+
+@dataclass(frozen=True)
+class FavoredDepartment:
+    name: str
+    multiplier: float
+
+
+@dataclass(frozen=True)
+class FavoredFrontDeskDepartment:
+    name: str
+    multiplier: float

@@ -61,6 +61,13 @@ python main.py employees.csv cpd-requirements.csv --output schedule.xlsx
 pytest tests/ -v
 ```
 
+## CLI flags
+
+- `--favor <EMPLOYEE>`: Soft preference to hit an employee's target hours. Repeatable.
+- `--training <DEPT,PERSON1,PERSON2>`: Soft requirement for two people to co-work in a department. Repeatable. Quote the value in shells that glob brackets (e.g., zsh): `--training"[marketing,Alice,Bob]"` or `--training 'marketing,Alice,Bob'`.
+- `--favor-dept <DEPT[:MULT]>`: Softly favor a department's focused hours and target adherence. Optional multiplier (default 1.0) to strengthen the bias. Repeatable.
+- `--favor-frontdesk-dept <DEPT[:MULT]>`: Softly favor members of a department for front desk duty. Optional multiplier (default 1.0). Repeatable.
+
 ## Input Format
 
 **employees.csv**: `name`, `roles` (semicolon/comma-separated), `target_hours`, `max_hours`, `year`, + 90 availability columns (`Mon_08:00` through `Fri_16:30`, 1=available, 0=unavailable)

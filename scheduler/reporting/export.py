@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
@@ -32,12 +32,16 @@ def export_schedule_to_excel(
     department_hour_targets,
     department_max_hours,
     output_path: Path,
+    primary_frontdesk_department,
 ):
     """Export the generated schedule to an Excel workbook with formatted sheets."""
     if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         return
 
     role_columns = [FRONT_DESK_ROLE] + department_roles
+    frontdesk_comment_for = _build_frontdesk_comment_lookup(
+        employees, qual, primary_frontdesk_department, role_display_names
+    )
 
     daily_tables = []
     weekly_rows = []
@@ -107,7 +111,7 @@ def export_schedule_to_excel(
     distribution_columns = ["Day"] + [role_display_names[role] for role in roles]
 
     _, _, department_breakdown = aggregate_department_hours(
-        solver, employees, days, time_slots, assign, department_roles, qual
+        solver, employees, days, time_slots, assign, department_roles, qual, primary_frontdesk_department
     )
 
     dept_summary_headers = [
@@ -154,11 +158,29 @@ def export_schedule_to_excel(
         df_weekly = pd.DataFrame(weekly_rows, columns=weekly_columns)
         df_weekly.to_excel(writer, sheet_name="Weekly Grid", index=False)
         _autosize_columns(writer, "Weekly Grid", df_weekly)
+        _add_frontdesk_comments_table(
+            writer=writer,
+            engine=engine,
+            sheet_name="Weekly Grid",
+            rows=weekly_rows,
+            value_column_idx=2,  # front desk column
+            row_offset=1,
+            comment_lookup=frontdesk_comment_for,
+        )
 
         for sheet_name, columns, rows in daily_tables:
             df_day = pd.DataFrame(rows, columns=columns)
             df_day.to_excel(writer, sheet_name=sheet_name, index=False)
             _autosize_columns(writer, sheet_name, df_day)
+            _add_frontdesk_comments_table(
+                writer=writer,
+                engine=engine,
+                sheet_name=sheet_name,
+                rows=rows,
+                value_column_idx=1,  # front desk column
+                row_offset=1,
+                comment_lookup=frontdesk_comment_for,
+            )
 
         df_summary = pd.DataFrame(summary_rows, columns=summary_columns)
         df_summary.to_excel(writer, sheet_name="Employee Summary", index=False)
@@ -171,6 +193,216 @@ def export_schedule_to_excel(
             df_dept = pd.DataFrame(dept_summary_rows, columns=dept_summary_headers)
             df_dept.to_excel(writer, sheet_name="Department Summary", index=False)
             _autosize_columns(writer, "Department Summary", df_dept)
+
+
+def _format_time_range(start_str: str, end_str: str) -> str:
+    def to_minutes(s: str) -> int:
+        h, m = map(int, s.split(":"))
+        return h * 60 + m
+
+    def fmt(minutes: int) -> str:
+        h = (minutes // 60) % 24
+        m = minutes % 60
+        suffix = "AM" if h < 12 else "PM"
+        hour12 = h % 12 or 12
+        return f"{hour12}{':' + str(m).zfill(2) if m else ''}{suffix}"
+
+    start_min = to_minutes(start_str)
+    end_min = to_minutes(end_str)
+    # end_str represents the start of the final slot; add 30 minutes for the true end
+    end_min += 30
+    return f"{fmt(start_min)}-{fmt(end_min)}"
+
+
+def _collect_intervals(assign, solver, employees, days, T, time_slots, role):
+    intervals: Dict[str, List[Tuple[str, int, int]]] = {day: [] for day in days}
+    for day in days:
+        for e in employees:
+            slots = [t for t in T if (e, day, t, role) in assign and solver.value(assign[(e, day, t, role)])]
+            if not slots:
+                continue
+            slots.sort()
+            start = prev = slots[0]
+            for s in slots[1:] + [None]:
+                if s is not None and s == prev + 1:
+                    prev = s
+                    continue
+                intervals[day].append((e, start, prev))
+                if s is not None:
+                    start = prev = s
+        # sort by start time then name for stable ordering
+        intervals[day].sort(key=lambda x: (x[1], x[0]))
+    return intervals
+
+
+def _build_frontdesk_comment_lookup(employees, qual, primary_frontdesk_department, role_display_names):
+    """Return a callable mapping employee name to an optional front desk comment."""
+    multi_dept_employees = set(
+        e for e in employees if e in qual and len([r for r in qual[e] if r != FRONT_DESK_ROLE]) > 1
+    )
+
+    def lookup(name: str) -> str | None:
+        if name not in multi_dept_employees:
+            return None
+        primary = primary_frontdesk_department.get(name)
+        if not primary:
+            return None
+        display = role_display_names.get(primary, primary.replace("_", " ").title())
+        return f"Half-time counts toward {display}"
+
+    return lookup
+
+
+def _add_frontdesk_comments_table(writer, engine, sheet_name, rows, value_column_idx, row_offset, comment_lookup):
+    """Attach comments to front desk cells for multi-department employees."""
+    if engine not in ("xlsxwriter", "openpyxl"):
+        return
+    worksheet = writer.sheets.get(sheet_name)
+    if worksheet is None:
+        return
+
+    for idx, row in enumerate(rows):
+        if value_column_idx >= len(row):
+            continue
+        cell_value = row[value_column_idx]
+        if not isinstance(cell_value, str):
+            continue
+        cell_value = cell_value.strip()
+        if not cell_value or cell_value.upper() == "UNCOVERED":
+            continue
+        # Front desk should only have one worker; if multiple, skip to avoid ambiguity
+        if "," in cell_value:
+            continue
+        comment = comment_lookup(cell_value)
+        if not comment:
+            continue
+        if engine == "xlsxwriter":
+            worksheet.write_comment(row_offset + idx, value_column_idx, comment)
+        elif engine == "openpyxl":
+            try:
+                from openpyxl.comments import Comment
+            except ImportError:
+                continue
+            excel_row = row_offset + idx + 1  # openpyxl is 1-indexed and header row is 1
+            excel_col = value_column_idx + 1
+            cell = worksheet.cell(row=excel_row, column=excel_col)
+            cell.comment = Comment(comment, "scheduler")
+
+
+def export_formatted_schedule(
+    status,
+    solver,
+    employees,
+    days,
+    T,
+    time_slot_starts,
+    slot_names,
+    qual,
+    assign,
+    department_roles,
+    role_display_names,
+    department_hour_targets,
+    department_max_hours,
+    primary_frontdesk_department,
+    output_path: Path,
+):
+    """Create an alternate, styled schedule file with per-department day grids."""
+    if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        return
+
+    try:
+        import xlsxwriter  # noqa: F401
+    except ImportError:
+        return  # skip formatted export if xlsxwriter is unavailable
+
+    formatted_path = output_path.with_name(f"{output_path.stem}-formatted{output_path.suffix}")
+
+    role_direct_slots, _, department_breakdown = aggregate_department_hours(
+        solver, employees, days, T, assign, department_roles, qual, primary_frontdesk_department
+    )
+
+    # Build department order: front desk then department roles
+    ordered_roles = [FRONT_DESK_ROLE] + department_roles
+    frontdesk_comment_for = _build_frontdesk_comment_lookup(
+        employees, qual, primary_frontdesk_department, role_display_names
+    )
+
+    # Gather intervals per role/day
+    intervals_by_role = {
+        role: _collect_intervals(assign, solver, employees, days, T, time_slot_starts, role)
+        for role in ordered_roles
+    }
+
+    workbook = xlsxwriter.Workbook(formatted_path)
+    ws = workbook.add_worksheet("Schedule")
+
+    header_fmt = workbook.add_format(
+        {"bold": True, "font_color": "black", "bg_color": "#00AEEF", "align": "center", "valign": "vcenter", "border": 1}
+    )
+    bold_fmt = workbook.add_format({"bold": True})
+    text_fmt = workbook.add_format({"align": "left", "valign": "top"})
+
+    # Column setup: A stats, then pairs per day
+    ws.set_column("A:A", 28)
+    day_cols = {
+        "Mon": ("B", "C"),
+        "Tue": ("D", "E"),
+        "Wed": ("F", "G"),
+        "Thu": ("H", "I"),
+        "Fri": ("J", "K"),
+    }
+    for cols in day_cols.values():
+        ws.set_column(f"{cols[0]}:{cols[0]}", 14)
+        ws.set_column(f"{cols[1]}:{cols[1]}", 18)
+
+    row = 0
+    for role in ordered_roles:
+        # Stats lines
+        display = role_display_names.get(role, role.replace("_", " ").title())
+        if role == FRONT_DESK_ROLE:
+            counted = role_direct_slots[role] * 0.5
+            ws.write(row, 0, f"FD: {counted:.1f}", bold_fmt)
+            row += 2
+        else:
+            stats = department_breakdown[role]
+            counted = stats["focused_hours"] + stats["dual_hours_counted"]
+            actual = stats["focused_hours"] + stats["dual_hours_total"]
+            dual_counted = stats["dual_hours_counted"]
+            dual_actual = stats["dual_hours_total"]
+            focused = stats["focused_hours"]
+            ws.write(row, 0, f"{display}: {counted:.1f} ({actual:.1f})", bold_fmt)
+            ws.write(row + 1, 0, f"Dual: {dual_counted:.2f} ({dual_actual:.2f})", text_fmt)
+            ws.write(row + 2, 0, f"Focused: {focused:.2f}", text_fmt)
+            row += 4
+
+        # Day headers
+        for idx, day in enumerate(days):
+            c1 = xlsxwriter.utility.xl_col_to_name(1 + idx * 2)
+            c2 = xlsxwriter.utility.xl_col_to_name(1 + idx * 2 + 1)
+            ws.merge_range(row, 1 + idx * 2, row, 1 + idx * 2 + 1, day, header_fmt)
+
+        row += 1
+        # Collect max rows among days
+        intervals = intervals_by_role[role]
+        max_len = max((len(v) for v in intervals.values()), default=0)
+        display_rows = max(3, max_len)
+        for i in range(display_rows):
+            for idx, day in enumerate(days):
+                entries = intervals.get(day, [])
+                if i < len(entries):
+                    name, start, end = entries[i]
+                    start_str = time_slot_starts[start]
+                    end_str = time_slot_starts[end]
+                    target_col = 1 + idx * 2
+                    ws.write(row + i, target_col, name, text_fmt)
+                    ws.write(row + i, 1 + idx * 2 + 1, _format_time_range(start_str, end_str), text_fmt)
+                    if role == FRONT_DESK_ROLE:
+                        comment = frontdesk_comment_for(name)
+                        if comment:
+                            ws.write_comment(row + i, target_col, comment)
+        row += display_rows + 2
+
+    workbook.close()
 
 
 def _autosize_columns(writer: pd.ExcelWriter, sheet_name: str, dataframe: pd.DataFrame):

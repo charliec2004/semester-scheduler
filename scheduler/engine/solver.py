@@ -791,7 +791,7 @@ def solve_schedule(
         under = model.new_int_var(0, 400, f"department_under[{role}]")
         model.add(total_role_units == target_units + over - under)
 
-        favor_mult = favored_departments_normalized.get(role).multiplier if role in favored_departments_normalized else 1.0
+        favor_mult = favored_departments_normalized.get(role).multiplier if role in favored_departments_normalized else 1.0     # type: ignore
         department_target_score -= favor_mult * (over + under)
 
         if threshold_units > 0:
